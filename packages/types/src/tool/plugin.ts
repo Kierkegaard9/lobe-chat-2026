@@ -20,11 +20,24 @@ export interface CustomPluginParams {
     appSlug: string;
     authConfigId: string;
     connectedAccountId: string;
+    /**
+     * The user entity that linked this connected account — passed as the Composio
+     * `userId` at runtime so a workspace member runs the owner's connection.
+     * Falls back to the row creator for rows written before this field existed.
+     */
+    linkedByUserId?: string;
     redirectUrl?: string;
     status: string;
   };
   description?: string;
   enableSettings?: boolean;
+  /**
+   * Set on the mock connectors Lobe Bench installs for an account from a
+   * benchmark's mock service: the discovery URL the manifest was read from.
+   * A run refreshes the plugin when its cases point at another URL and never
+   * touches plugins without this marker.
+   */
+  lobeBench?: { url: string };
   manifestMode?: 'local' | 'url';
   manifestUrl?: string;
   /**

@@ -2,7 +2,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { AgentSignalProcedureInspector, createProcedurePolicyOptions } from '../../../procedure';
-import { createRuntimeProcessorContext } from '../../../runtime/context';
 import type { AgentSignalPolicyStateStore } from '../../../store/types';
 import type {
   ActionUserMemoryHandle,
@@ -13,18 +12,9 @@ import type {
 } from '../../types';
 import { createAnalyzeIntentPolicy } from '..';
 import { createFeedbackActionPlannerSignalHandler } from '../feedbackAction';
+import { createFeedbackTestContext } from './testUtils';
 
-const context = createRuntimeProcessorContext({
-  backend: {
-    async getGuardState() {
-      return {};
-    },
-    async touchGuardState() {
-      return {};
-    },
-  },
-  scopeKey: 'topic:thread_1',
-});
+const context = createFeedbackTestContext();
 
 const createStore = (): AgentSignalPolicyStateStore => {
   const state = new Map<string, Record<string, string>>();
@@ -54,10 +44,7 @@ type DomainSignalInput<TTarget extends SupportedTask4DomainTarget> = {
   skillActionIntent?: 'consolidate' | 'create' | 'maintain' | 'noop' | 'refine';
   skillIntentConfidence?: number;
   skillIntentExplicitness?:
-    | 'explicit_action'
-    | 'implicit_strong_learning'
-    | 'non_skill_preference'
-    | 'weak_positive';
+    'explicit_action' | 'implicit_strong_learning' | 'non_skill_preference' | 'weak_positive';
   skillIntentReason?: string;
   skillRoute?: 'accumulate' | 'direct_decision' | 'non_skill';
   signalId: string;
@@ -426,6 +413,70 @@ describe('feedbackActionPlanner', () => {
       expect.objectContaining({
         feedbackMessageId: 'msg_skill_defer',
         route: 'direct_decision',
+      }),
+    );
+  });
+
+  /**
+   * A server execAgent inbound skill candidate (trigger is neither
+   * `client.runtime.*` nor an agent-signal self-iteration run) is parked WITH a
+   * synthesis payload and NOT dispatched on the user prompt alone — the deferred
+   * completion-stage handler synthesizes it off the full trajectory instead of
+   * just the user prompt.
+   */
+  it('parks a server-inbound skill candidate until agent.execution.completed', async () => {
+    const store = createStore();
+    const procedure = createProcedurePolicyOptions({
+      now: () => 123,
+      policyStateStore: store,
+      ttlSeconds: 3600,
+    });
+    const writeIntentRecord = vi.spyOn(procedure.procedureState.skillIntentRecords!, 'write');
+    const skillActions = { prepare: vi.fn() };
+    const handler = createFeedbackActionPlannerSignalHandler({
+      actionServices: {
+        memoryActions: { prepare: vi.fn() },
+        skillActions: skillActions as never,
+      },
+      procedure: {
+        now: () => 123,
+        procedureState: procedure.procedureState,
+      },
+    });
+    const signal = createDomainSignal({
+      message: 'Assign T199 to device 2, research and build an MVP, then write a report.',
+      messageId: 'msg_skill_server',
+      satisfactionResult: 'not_satisfied',
+      signalId: 'sig_skill_server',
+      skillActionIntent: 'create',
+      skillIntentConfidence: 0.9,
+      skillIntentExplicitness: 'implicit_strong_learning',
+      skillIntentReason: 'a reusable task execution pattern',
+      skillRoute: 'direct_decision',
+      sourceId: 'source_skill_server',
+      target: 'skill',
+      // A server execAgent inbound trigger — not client.runtime.* and not the
+      // agent-signal self-iteration trigger — so it reaches the deferred lane.
+      trigger: 'bot',
+    });
+
+    const result = await handler.handle(signal, context);
+
+    expect(result).toEqual({
+      concluded: { reason: 'skill candidate parked until agent.execution.completed' },
+      status: 'conclude',
+    });
+    // Crucially: no inbound dispatch — synthesis is deferred, not run on the prompt.
+    expect(skillActions.prepare).not.toHaveBeenCalled();
+    // The parked record carries the synthesis payload (message) for the
+    // completion-stage handler to act on once the trajectory exists.
+    expect(writeIntentRecord).toHaveBeenCalledWith(
+      expect.objectContaining({
+        feedbackMessageId: 'msg_skill_server',
+        route: 'direct_decision',
+        pendingSynthesis: expect.objectContaining({
+          message: 'Assign T199 to device 2, research and build an MVP, then write a report.',
+        }),
       }),
     );
   });

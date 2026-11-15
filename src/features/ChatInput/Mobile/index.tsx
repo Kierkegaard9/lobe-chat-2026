@@ -2,9 +2,12 @@
 
 import { ChatInput, ChatInputActionBar } from '@lobehub/editor/react';
 import { Flexbox } from '@lobehub/ui';
-import { createStaticStyles, cssVar, cx } from 'antd-style';
+import { cssVar } from '@lobehub/ui/stylex/cssVar.stylex';
+import * as stylex from '@stylexjs/stylex';
 import { memo } from 'react';
 
+import ChatInputNotice from '@/features/ChatInput/ChatInputNotice';
+import ComposerExpandButton from '@/features/ChatInput/components/ComposerExpandButton';
 import { useChatInputStore } from '@/features/ChatInput/store';
 import dynamic from '@/libs/next/dynamic';
 
@@ -14,20 +17,21 @@ import SendArea from '../SendArea';
 
 const FilePreview = dynamic(() => import('./FilePreview'), { ssr: false });
 
-const styles = createStaticStyles(({ css }) => ({
-  container: css``,
-  fullscreen: css`
-    position: absolute;
-    z-index: 100;
-    inset: 0;
-
-    width: 100%;
-    height: 100%;
-    padding: 12px;
-
-    background: ${cssVar.colorBgLayout};
-  `,
-}));
+const styles = stylex.create({
+  fullscreen: {
+    position: 'absolute',
+    zIndex: 100,
+    inset: 0,
+    width: '100%',
+    height: '100%',
+    padding: '12px',
+    backgroundColor: cssVar.colorBgLayout,
+    backgroundImage: 'none',
+  },
+  leftActions: { flex: 'none', minWidth: '0' },
+  leftActionsItem: { flex: 'none' },
+  leftSlot: { overflow: 'hidden', flex: '1', minWidth: '0' },
+});
 
 const DesktopChatInput = memo(() => {
   const [slashMenuRef, expand] = useChatInputStore((s) => [s.slashMenuRef, s.expand]);
@@ -39,21 +43,45 @@ const DesktopChatInput = memo(() => {
     <>
       {!expand && fileNode}
       <Flexbox
-        className={cx(styles.container, expand && styles.fullscreen)}
+        className={stylex.props(expand && styles.fullscreen).className}
+        gap={8}
         paddingBlock={'0 12px'}
         paddingInline={12}
       >
         <ChatInput
           fullscreen={expand}
-          header={<ChatInputActionBar left={<ActionBar />} />}
           slashMenuRef={slashMenuRef}
           footer={
             <ChatInputActionBar
               left={<div />}
-              right={<SendArea />}
+              right={<SendArea hideContextWindow={false} />}
               style={{
                 paddingRight: 8,
               }}
+            />
+          }
+          header={
+            <ChatInputActionBar
+              left={
+                <Flexbox
+                  horizontal
+                  align={'center'}
+                  className={stylex.props(styles.leftSlot).className}
+                  gap={4}
+                >
+                  <Flexbox horizontal align={'center'} flex={'none'} gap={2}>
+                    <Flexbox
+                      horizontal
+                      align={'center'}
+                      className={stylex.props(styles.leftActions).className}
+                    >
+                      <ActionBar disableCollapse xstyle={styles.leftActionsItem} />
+                    </Flexbox>
+                    <ComposerExpandButton />
+                  </Flexbox>
+                  <ChatInputNotice />
+                </Flexbox>
+              }
             />
           }
         >

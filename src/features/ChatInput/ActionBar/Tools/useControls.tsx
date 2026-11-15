@@ -1,18 +1,25 @@
-import {
-  COMPOSIO_APP_TYPES,
-  LOBEHUB_SKILL_PROVIDERS,
-  RECOMMENDED_SKILLS,
-  RecommendedSkillType,
-} from '@lobechat/const';
+import { MemoryManifest } from '@lobechat/builtin-tool-memory';
+import { WebBrowsingManifest } from '@lobechat/builtin-tool-web-browsing';
+import { getConnectorCatalog, RECOMMENDED_SKILLS, RecommendedSkillType } from '@lobechat/const';
+import { type AgentPluginMode, getDisabledPluginIds } from '@lobechat/types';
 import type { ItemType } from '@lobehub/ui';
-import { Avatar, Icon, Popover, SearchBar, stopPropagation, Tag, Tooltip } from '@lobehub/ui';
-import { confirmModal } from '@lobehub/ui/base-ui';
+import {
+  Avatar,
+  confirmModal,
+  Icon,
+  Popover,
+  SearchBar,
+  stopPropagation,
+  Switch,
+  Tag,
+  Tooltip,
+} from '@lobehub/ui';
 import { McpIcon, SkillsIcon } from '@lobehub/ui/icons';
-import { Switch } from 'antd';
-import { createStaticStyles, cssVar, cx } from 'antd-style';
+import * as stylex from '@stylexjs/stylex';
 import isEqual from 'fast-deep-equal';
 import {
   BadgeCheck,
+  Ban,
   Check,
   ChevronDown,
   ChevronRight,
@@ -29,7 +36,8 @@ import type { ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import DevModal from '@/features/PluginDevModal';
+import { openConnectorEditDrawer } from '@/features/Connectors/CustomConnectorModal/imperative';
+import { openPluginEditDrawer } from '@/features/PluginDevModal/imperative';
 import { createSkillStoreModal } from '@/features/SkillStore';
 import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
 import { useCheckPluginsIsInstalled } from '@/hooks/useCheckPluginsIsInstalled';
@@ -37,6 +45,7 @@ import { useFetchInstalledPlugins } from '@/hooks/useFetchInstalledPlugins';
 import { usePermission } from '@/hooks/usePermission';
 import { useAgentStore } from '@/store/agent';
 import { agentByIdSelectors, chatConfigByIdSelectors } from '@/store/agent/selectors';
+import { aiModelSelectors, useAiInfraStore } from '@/store/aiInfra';
 import { serverConfigSelectors, useServerConfigStore } from '@/store/serverConfig';
 import { useToolStore } from '@/store/tool';
 import {
@@ -51,18 +60,28 @@ import { connectorSelectors } from '@/store/tool/slices/connector';
 import { LobehubSkillStatus } from '@/store/tool/slices/lobehubSkillStore/types';
 
 import { useAgentId } from '../../hooks/useAgentId';
+import { useEffectiveModel } from '../../hooks/useEffectiveModel';
 import { useUpdateAgentConfig } from '../../hooks/useUpdateAgentConfig';
+import { closeToolDetailPopovers } from '../components/useDetailPopoverState';
+import { MemoryEffortControl } from '../Memory/Controls';
+import { useMemoryEnabled } from '../Memory/useMemoryEnabled';
+import { SearchAdvancedControls } from '../Search/Controls';
+import {
+  isCapabilityTool,
+  resolveCapabilityConfigPatch,
+  resolveCapabilityMode,
+} from './capabilityTools';
 import ComposioServerItem from './ComposioServerItem';
 import ComposioSkillIcon from './ComposioSkillIcon';
+import { SKILL_ICON_SIZE } from './constants';
 import LobehubSkillIcon from './LobehubSkillIcon';
 import LobehubSkillServerItem from './LobehubSkillServerItem';
 import MarketAgentSkillPopoverContent from './MarketAgentSkillPopoverContent';
 import MarketSkillIcon from './MarketSkillIcon';
+import SkillRow from './SkillRow';
 import ToolItem from './ToolItem';
 import ToolItemDetailPopover from './ToolItemDetailPopover';
-
-const SKILL_ICON_SIZE = 18;
-const CLOSE_TOOL_DETAIL_POPOVER_EVENT = 'lobe-chat-tool-detail-popover-close';
+import { styles } from './useControls.styles';
 
 const officialTag = (
   <Tooltip placement={'top'} title={'LobeHub'}>
@@ -70,7 +89,13 @@ const officialTag = (
   </Tooltip>
 );
 
-type SkillPolicyMode = 'auto' | 'pinned';
+type SkillPolicyMode = AgentPluginMode;
+
+// Capability rows offer the same three states as any other skill row. A model whose
+// built-in search can never be turned off has no Disabled state to offer — the write
+// would be overridden by the runtime — so its search row keeps Pinned/Auto only.
+const CAPABILITY_MODES: SkillPolicyMode[] = ['pinned', 'auto', 'disabled'];
+const CAPABILITY_MODES_WITHOUT_DISABLE: SkillPolicyMode[] = ['pinned', 'auto'];
 
 interface SkillDeleteConfig {
   displayName: string;
@@ -81,322 +106,44 @@ interface SkillConfigureConfig {
   onConfigure: () => void;
 }
 
+interface SkillPolicyMenuOptions {
+  configureConfig?: SkillConfigureConfig;
+  /**
+   * @default 'auto'
+   */
+  defaultMode?: SkillPolicyMode;
+  deleteConfig?: SkillDeleteConfig;
+  /**
+   * Hide the activation options and show only the configure/delete actions. Used
+   * for integrations that exist but aren't connected yet (pending auth /
+   * re-authorize), where activation is meaningless but the user still needs a way
+   * to remove the entry.
+   */
+  deleteOnly?: boolean;
+  /**
+   * Activation state for rows whose on/off is NOT stored in `agents.plugins` —
+   * memory and web search derive it from chatConfig, so reading the plugin list
+   * would report the wrong state for them.
+   */
+  modeOverride?: SkillPolicyMode;
+  /**
+   * Capability settings rendered under the activation options (e.g. the memory
+   * effort level), so a capability row keeps its tuning after leaving the "+"
+   * menu. The block owns the separator above itself and renders nothing when it
+   * has nothing to show, so the panel never keeps a divider over empty space.
+   */
+  panelExtra?: ReactNode;
+  /**
+   * @default ['pinned', 'auto', 'disabled']
+   */
+  supportedModes?: SkillPolicyMode[];
+}
+
 type SkillMenuItem = NonNullable<ItemType> & {
   extra?: ReactNode;
   popoverContent?: ReactNode;
   searchText?: string;
 };
-
-const styles = createStaticStyles(({ css }) => ({
-  activationGroupHeader: css`
-    cursor: pointer;
-
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    justify-content: space-between;
-
-    width: 100%;
-    min-width: 0;
-    padding-block: 4px;
-  `,
-  activationGroupChevron: css`
-    display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-
-    width: 24px;
-    height: 24px;
-
-    color: ${cssVar.colorTextTertiary};
-  `,
-  activationGroupTitle: css`
-    display: flex;
-    gap: 7px;
-    align-items: center;
-
-    min-width: 0;
-    min-height: 18px;
-  `,
-  activationGroupTitleBlock: css`
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    min-width: 0;
-  `,
-  activationGroupTitleText: css`
-    overflow: hidden;
-
-    min-width: 0;
-
-    font-size: 14px;
-    font-weight: 500;
-    color: ${cssVar.colorText};
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  `,
-  count: css`
-    flex: none;
-    color: ${cssVar.colorTextTertiary};
-  `,
-  activationGroupActions: css`
-    display: flex;
-    flex: none;
-    gap: 8px;
-    align-items: center;
-  `,
-  switchWrap: css`
-    display: inline-flex;
-    flex: none;
-    align-items: center;
-  `,
-  iconAuto: css`
-    color: ${cssVar.colorInfo};
-  `,
-  iconDefault: css`
-    color: ${cssVar.colorTextTertiary};
-  `,
-  iconPinned: css`
-    color: ${cssVar.colorInfo};
-  `,
-  fixedIndicator: css`
-    display: inline-flex;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-
-    width: 24px;
-    height: 24px;
-
-    color: ${cssVar.colorTextQuaternary};
-  `,
-  policyButton: css`
-    cursor: pointer;
-
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    border: 0;
-    border-radius: 6px;
-
-    color: ${cssVar.colorTextTertiary};
-
-    background: transparent;
-
-    transition:
-      color 0.2s,
-      background 0.2s;
-
-    &:hover {
-      color: ${cssVar.colorTextSecondary};
-      background: ${cssVar.colorFillTertiary};
-    }
-
-    &:disabled {
-      cursor: not-allowed;
-      opacity: 0.45;
-      background: transparent;
-    }
-  `,
-  deleteButton: css`
-    cursor: pointer;
-
-    display: flex;
-    gap: 10px;
-    align-items: center;
-
-    width: 100%;
-    min-height: 36px;
-    padding-block: 8px;
-    padding-inline: 10px;
-    border: 0;
-    border-radius: 6px;
-
-    font-size: 14px;
-    line-height: 20px;
-    color: ${cssVar.colorError};
-
-    background: transparent;
-
-    transition: background 150ms ${cssVar.motionEaseOut};
-
-    &:hover {
-      background: ${cssVar.colorErrorBg};
-    }
-
-    &:disabled {
-      cursor: not-allowed;
-      opacity: 0.45;
-      background: transparent;
-    }
-  `,
-  deleteDivider: css`
-    height: 1px;
-    margin-block: 2px;
-    margin-inline: 4px;
-    background: ${cssVar.colorBorderSecondary};
-  `,
-  deleteIcon: css`
-    color: ${cssVar.colorError};
-  `,
-  policyCheck: css`
-    display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-
-    width: 16px;
-    height: 16px;
-
-    color: ${cssVar.colorInfo};
-  `,
-  policyItem: css`
-    cursor: pointer;
-
-    display: flex;
-    gap: 10px;
-    align-items: center;
-
-    width: 100%;
-    min-height: 36px;
-    padding-block: 8px;
-    padding-inline: 10px;
-    border: 0;
-    border-radius: 6px;
-
-    font-size: 14px;
-    line-height: 20px;
-    color: ${cssVar.colorText};
-
-    background: transparent;
-
-    transition: background 150ms ${cssVar.motionEaseOut};
-
-    &:hover {
-      background: ${cssVar.colorFillTertiary};
-    }
-
-    &:disabled {
-      cursor: not-allowed;
-      opacity: 0.45;
-      background: transparent;
-    }
-  `,
-  policyItemIcon: css`
-    display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-
-    width: 16px;
-    height: 16px;
-  `,
-  policyPanel: css`
-    min-width: 132px;
-    padding: 4px;
-    border-radius: ${cssVar.borderRadius};
-
-    background: ${cssVar.colorBgElevated};
-    box-shadow:
-      0 0 15px 0 #00000008,
-      0 2px 30px 0 #00000014;
-  `,
-  policyText: css`
-    flex: 1;
-    text-align: start;
-  `,
-  toolLabel: css`
-    display: flex;
-    flex: 1;
-    gap: 6px;
-    align-items: center;
-
-    min-width: 0;
-  `,
-  toolLabelText: css`
-    overflow: hidden;
-    flex: 0 1 auto;
-
-    min-width: 0;
-
-    line-height: 1.4;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  `,
-  toolRow: css`
-    display: flex;
-    gap: 16px;
-    align-items: center;
-    justify-content: space-between;
-
-    width: 100%;
-    min-width: 0;
-  `,
-  toolTrailing: css`
-    display: inline-flex;
-    flex: none;
-    gap: 8px;
-    align-items: center;
-  `,
-  typeTag: css`
-    display: inline-flex;
-    flex: none;
-    align-items: center;
-
-    padding-block: 1px;
-    padding-inline: 4px;
-    border: 1px solid ${cssVar.colorBorderSecondary};
-    border-radius: 4px;
-
-    color: ${cssVar.colorTextTertiary};
-
-    background: ${cssVar.colorFillQuaternary};
-  `,
-  addSkillRow: css`
-    cursor: pointer;
-
-    display: flex;
-    gap: 8px;
-    align-items: center;
-
-    /* width: 320px + margin-inline: -12px anchors the submenu to 320px so it
-       matches the attachment submenu, and lets the row break out of the footer's
-       12px inline padding to span full width; padding-inline: 12px then re-aligns
-       the icon/text to the same column as the menu rows above. */
-    width: 320px;
-    min-height: 32px;
-    margin-inline: -12px;
-    padding-inline: 12px;
-    border: 0;
-    border-radius: 6px;
-
-    font-size: 14px;
-    color: ${cssVar.colorText};
-
-    background: transparent;
-
-    transition: background 150ms ${cssVar.motionEaseOut};
-
-    &:hover {
-      background: ${cssVar.colorFillTertiary};
-    }
-
-    /* The footer adds 8px block padding; cancel it on the last action row so the
-       bottom row sits flush against the popup edge instead of leaving a gap. */
-    &:last-child {
-      margin-block-end: -8px;
-    }
-  `,
-  addSkillLabel: css`
-    flex: 1;
-    text-align: start;
-  `,
-}));
 
 export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = {}) => {
   const { t } = useTranslation('setting');
@@ -405,6 +152,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
   const { updateAgentChatConfig } = useUpdateAgentConfig();
   const [pinnedOpen, setPinnedOpen] = useState(true);
   const [autoOpen, setAutoOpen] = useState(true);
+  const [disabledOpen, setDisabledOpen] = useState(true);
   const [policyOpenId, setPolicyOpenId] = useState<string | null>(null);
   const [searchKeyword, setSearchKeyword] = useState('');
   const [autoModeLoading, setAutoModeLoading] = useState(false);
@@ -414,27 +162,29 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     uninstallPlugin,
     removeComposioConnection,
     deleteAgentSkill,
-    installCustomPlugin,
-    updateNewCustomPlugin,
     uninstallBuiltinTool,
+    deleteConnector,
   ] = useToolStore((s) => [
     s.uninstallCustomPlugin,
     s.removeComposioConnection,
     s.deleteAgentSkill,
-    s.installCustomPlugin,
-    s.updateNewCustomPlugin,
     s.uninstallBuiltinTool,
+    s.deleteConnector,
   ]);
-  const [editingPluginId, setEditingPluginId] = useState<string | null>(null);
-  const editingCustomPlugin = useToolStore(
-    pluginSelectors.getCustomPluginById(editingPluginId ?? ''),
-    isEqual,
-  );
-  const [checked, togglePlugin] = useAgentStore((s) => [
+  const [checked, togglePlugin, setPluginMode] = useAgentStore((s) => [
+    // Pinned identifiers only (getAgentPluginsById already excludes disabled).
     agentByIdSelectors.getAgentPluginsById(agentId)(s),
     s.togglePlugin,
+    s.setPluginMode,
   ]);
   const checkedSet = useMemo(() => new Set(checked), [checked]);
+  // Disabled identifiers, read from the raw (unfiltered) plugins config —
+  // needed to render the dedicated Disabled group and policy-menu state.
+  const rawPlugins = useAgentStore(
+    (s) => agentByIdSelectors.getAgentConfigById(agentId)(s)?.plugins,
+  );
+  const disabledIds = useMemo(() => getDisabledPluginIds(rawPlugins), [rawPlugins]);
+  const disabledIdSet = useMemo(() => new Set(disabledIds), [disabledIds]);
   // In manual skill-activate mode, surface hidden builtin tools (web-browsing,
   // cloud-sandbox, knowledge-base, etc.) so users can explicitly enable/disable them.
   // In auto mode the activator handles those tools transparently, so they remain hidden.
@@ -460,48 +210,105 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
   );
   const plugins = useAgentStore((s) => agentByIdSelectors.getAgentPluginsById(agentId)(s));
 
+  // Memory and web browsing are runtime-managed builtin tools: `hidden` keeps them
+  // out of `metaList`, and the shared engine rules force their enabled state from
+  // chatConfig rather than from `agents.plugins`. They still belong in the Tools
+  // popover's activation list, so their policy is derived from — and written back
+  // to — that same chatConfig. One source of truth keeps every other reader of it
+  // (memory injection, the search wiring) in agreement with this list.
+  const isMemoryCapabilityEnabled = useMemoryEnabled(agentId);
+  const { model, provider } = useEffectiveModel(agentId);
+  const searchMode = useAgentStore((s) => chatConfigByIdSelectors.getSearchModeById(agentId)(s));
+  const isModelBuiltinSearchInternal = useAiInfraStore(
+    aiModelSelectors.isModelBuiltinSearchInternal(model, provider),
+  );
+  // A model whose built-in search can never be turned off has no Disabled state to
+  // offer — the action would write a config the runtime keeps overriding.
+  const isSearchCapabilityEnabled = isModelBuiltinSearchInternal || searchMode !== 'off';
+  const searchCapabilityModes = isModelBuiltinSearchInternal
+    ? CAPABILITY_MODES_WITHOUT_DISABLE
+    : CAPABILITY_MODES;
+  const disabledCapabilityIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!isMemoryCapabilityEnabled) ids.add(MemoryManifest.identifier);
+    if (!isSearchCapabilityEnabled) ids.add(WebBrowsingManifest.identifier);
+    return ids;
+  }, [isMemoryCapabilityEnabled, isSearchCapabilityEnabled]);
+
   const updateSkillPolicy = useCallback(
     async (id: string, mode: SkillPolicyMode) => {
       if (!canEdit) return;
-      const shouldPin = mode === 'pinned';
-      if (checkedSet.has(id) === shouldPin) return;
 
-      await togglePlugin(id, shouldPin);
+      // A capability has two homes. chatConfig carries the on/off state the engine
+      // reads (`resolveToolRules`), so the row, the injection and the wiring can never
+      // disagree; `agents.plugins` carries the explicit Pinned/Disabled choice, which
+      // is what puts the row in the Pinned or Disabled group.
+      if (isCapabilityTool(id)) {
+        const currentMode: SkillPolicyMode = checkedSet.has(id)
+          ? 'pinned'
+          : disabledIdSet.has(id)
+            ? 'disabled'
+            : 'auto';
+        if (currentMode === mode) return;
+
+        const patch = resolveCapabilityConfigPatch(id, mode);
+        if (patch) await updateAgentChatConfig(patch);
+        await setPluginMode(id, mode);
+        return;
+      }
+
+      const currentMode: SkillPolicyMode = checkedSet.has(id)
+        ? 'pinned'
+        : disabledIdSet.has(id)
+          ? 'disabled'
+          : 'auto';
+      if (currentMode === mode) return;
+
+      await setPluginMode(id, mode);
     },
-    [canEdit, checkedSet, togglePlugin],
+    [canEdit, checkedSet, disabledIdSet, setPluginMode, updateAgentChatConfig],
   );
 
   const openSkillPolicyMenu = useCallback((id: string) => {
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new Event(CLOSE_TOOL_DETAIL_POPOVER_EVENT));
-    }
+    closeToolDetailPopovers();
     setPolicyOpenId(id);
   }, []);
 
   const renderPolicyMenu = useCallback(
-    (
-      id: string,
-      deleteConfig?: SkillDeleteConfig,
-      configureConfig?: SkillConfigureConfig,
-      // When true, hide the Pinned/Auto activation options and show only the
-      // configure/delete actions. Used for integrations that exist but aren't
-      // connected yet (pending auth / re-authorize), where activation is
-      // meaningless but the user still needs a way to remove the entry.
-      deleteOnly = false,
-    ) => {
-      const mode: SkillPolicyMode = checkedSet.has(id) ? 'pinned' : 'auto';
+    (id: string, options: SkillPolicyMenuOptions = {}) => {
+      const {
+        configureConfig,
+        defaultMode = 'auto',
+        deleteConfig,
+        deleteOnly = false,
+        modeOverride,
+        panelExtra,
+        supportedModes = ['pinned', 'auto', 'disabled'],
+      } = options;
+      const mode: SkillPolicyMode =
+        modeOverride ??
+        (checkedSet.has(id) ? 'pinned' : disabledIdSet.has(id) ? 'disabled' : defaultMode);
       const renderCheck = (value: SkillPolicyMode) =>
         mode === value ? (
-          <span className={cx(styles.policyCheck)}>
+          <span {...stylex.props(styles.policyCheck)}>
             <Icon icon={Check} size={14} />
           </span>
         ) : (
-          <span className={cx(styles.policyCheck)} />
+          <span {...stylex.props(styles.policyCheck)} />
         );
+
+      // Right-click / "..." menu is an action list (Pin / Auto / Disable), not a
+      // status readout — group headers still use the state labels below.
+      // `as const` keeps literal keys so `t()` stays typed against setting resources.
+      const policyActionKey = {
+        auto: 'tools.activation.action.auto',
+        disabled: 'tools.activation.action.disable',
+        pinned: 'tools.activation.action.pin',
+      } as const satisfies Record<SkillPolicyMode, string>;
 
       const renderPolicyItem = (value: SkillPolicyMode, icon: ReactNode) => (
         <button
-          className={cx(styles.policyItem)}
+          {...stylex.props(styles.policyItem)}
           disabled={!canEdit}
           type="button"
           onClick={async (event) => {
@@ -511,44 +318,61 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
             await updateSkillPolicy(id, value);
           }}
         >
-          <span className={cx(styles.policyItemIcon)}>{icon}</span>
-          <span className={cx(styles.policyText)}>
-            {t(value === 'pinned' ? 'tools.activation.pin' : `tools.activation.${value}`)}
-          </span>
+          <span {...stylex.props(styles.policyItemIcon)}>{icon}</span>
+          <span {...stylex.props(styles.policyText)}>{t(policyActionKey[value])}</span>
           {renderCheck(value)}
         </button>
       );
 
       const content = (
         <div
-          className={cx(styles.policyPanel)}
+          {...stylex.props(styles.policyPanel, Boolean(panelExtra) && styles.policyPanelWide)}
           onClick={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.stopPropagation()}
         >
           {!deleteOnly &&
+            supportedModes.includes('pinned') &&
             renderPolicyItem(
               'pinned',
               <Icon
-                className={cx(mode === 'pinned' ? styles.iconPinned : styles.iconDefault)}
                 icon={Pin}
                 size={15}
+                className={
+                  stylex.props(mode === 'pinned' ? styles.iconPinned : styles.iconDefault).className
+                }
               />,
             )}
           {!deleteOnly &&
+            supportedModes.includes('auto') &&
             renderPolicyItem(
               'auto',
               <Icon
-                className={cx(mode === 'auto' ? styles.iconAuto : styles.iconDefault)}
                 icon={Zap}
                 size={15}
+                className={
+                  stylex.props(mode === 'auto' ? styles.iconAuto : styles.iconDefault).className
+                }
+              />,
+            )}
+          {!deleteOnly &&
+            supportedModes.includes('disabled') &&
+            renderPolicyItem(
+              'disabled',
+              <Icon
+                icon={Ban}
+                size={15}
+                className={
+                  stylex.props(mode === 'disabled' ? styles.iconDisabled : styles.iconDefault)
+                    .className
+                }
               />,
             )}
           {!deleteOnly && (configureConfig || deleteConfig) && (
-            <div className={cx(styles.deleteDivider)} />
+            <div {...stylex.props(styles.deleteDivider)} />
           )}
           {configureConfig && (
             <button
-              className={cx(styles.policyItem)}
+              {...stylex.props(styles.policyItem)}
               disabled={!canEdit}
               type="button"
               onClick={(event) => {
@@ -558,15 +382,15 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
                 configureConfig.onConfigure();
               }}
             >
-              <span className={cx(styles.policyItemIcon)}>
+              <span {...stylex.props(styles.policyItemIcon)}>
                 <Icon icon={Wrench} size={15} />
               </span>
-              <span className={cx(styles.policyText)}>{t('tools.builtins.configure')}</span>
+              <span {...stylex.props(styles.policyText)}>{t('tools.builtins.configure')}</span>
             </button>
           )}
           {deleteConfig && (
             <button
-              className={cx(styles.deleteButton)}
+              {...stylex.props(styles.deleteButton)}
               disabled={!canEdit}
               type="button"
               onClick={(event) => {
@@ -587,12 +411,17 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
                 });
               }}
             >
-              <span className={cx(styles.policyItemIcon)}>
-                <Icon className={cx(styles.deleteIcon)} icon={Trash2} size={15} />
+              <span {...stylex.props(styles.policyItemIcon)}>
+                <Icon
+                  className={stylex.props(styles.deleteIcon).className}
+                  icon={Trash2}
+                  size={15}
+                />
               </span>
-              <span className={cx(styles.policyText)}>{t('tools.builtins.uninstall')}</span>
+              <span {...stylex.props(styles.policyText)}>{t('tools.builtins.uninstall')}</span>
             </button>
           )}
+          {panelExtra}
         </div>
       );
 
@@ -609,14 +438,13 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
         >
           <button
             aria-label={t('tools.skillActivateMode.title')}
-            className={cx(styles.policyButton)}
+            {...stylex.props(styles.policyButton)}
             disabled={!canEdit}
             type="button"
+            onPointerEnter={closeToolDetailPopovers}
             onClick={(event) => {
               event.stopPropagation();
-              if (typeof window !== 'undefined') {
-                window.dispatchEvent(new Event(CLOSE_TOOL_DETAIL_POPOVER_EVENT));
-              }
+              closeToolDetailPopovers();
             }}
             onContextMenu={(event) => {
               event.preventDefault();
@@ -625,14 +453,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
             }}
             onPointerDown={(event) => {
               event.stopPropagation();
-              if (typeof window !== 'undefined') {
-                window.dispatchEvent(new Event(CLOSE_TOOL_DETAIL_POPOVER_EVENT));
-              }
-            }}
-            onPointerEnter={() => {
-              if (typeof window !== 'undefined') {
-                window.dispatchEvent(new Event(CLOSE_TOOL_DETAIL_POPOVER_EVENT));
-              }
+              closeToolDetailPopovers();
             }}
           >
             <Icon icon={MoreHorizontal} size={15} />
@@ -640,7 +461,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
         </Popover>
       );
     },
-    [canEdit, checkedSet, openSkillPolicyMenu, policyOpenId, t, updateSkillPolicy],
+    [canEdit, checkedSet, disabledIdSet, openSkillPolicyMenu, policyOpenId, t, updateSkillPolicy],
   );
 
   const renderToolLabel = useCallback(
@@ -651,49 +472,66 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
       badge?: ReactNode,
       icon?: ReactNode,
       extraTag?: ReactNode,
+      detailContent?: ReactNode,
     ) => (
-      <span
-        className={cx(styles.toolRow)}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          openSkillPolicyMenu(id);
-        }}
-      >
-        <span className={cx(styles.toolLabel)}>
-          {icon}
-          <span className={cx(styles.toolLabelText)}>{label}</span>
-          {extraTag}
-        </span>
-        <span className={cx(styles.toolTrailing)}>
-          {badge && <span className={cx(styles.typeTag)}>{badge}</span>}
-          {action}
-        </span>
-      </span>
+      <SkillRow
+        className={stylex.props(styles.toolRow, stylex.defaultMarker()).className}
+        detailContent={detailContent}
+        detailDisabled={policyOpenId !== null}
+        labelClassName={stylex.props(styles.toolLabel).className}
+        label={
+          <>
+            {icon}
+            <span {...stylex.props(styles.toolLabelBody)}>
+              <span {...stylex.props(styles.toolLabelText)}>{label}</span>
+              {extraTag}
+            </span>
+          </>
+        }
+        trailing={
+          <>
+            {badge && <span {...stylex.props(styles.typeTag)}>{badge}</span>}
+            {action}
+          </>
+        }
+        trailingClassName={
+          stylex.props(styles.toolTrailing, policyOpenId === id && styles.toolTrailingVisible)
+            .className
+        }
+        onContextMenu={() => openSkillPolicyMenu(id)}
+      />
     ),
-    [openSkillPolicyMenu],
+    [openSkillPolicyMenu, policyOpenId],
   );
 
   const createManagedSkillItem = useCallback(
     ({
       badge,
       configureConfig,
+      defaultMode,
       deleteConfig,
       extraTag,
       icon,
       id,
+      modeOverride,
+      panelExtra,
       popoverContent,
       searchText,
+      supportedModes,
       title,
     }: {
       badge?: ReactNode;
       configureConfig?: SkillConfigureConfig;
+      defaultMode?: SkillPolicyMode;
       deleteConfig?: SkillDeleteConfig;
       extraTag?: ReactNode;
       icon: ReactNode;
       id: string;
+      modeOverride?: SkillPolicyMode;
+      panelExtra?: ReactNode;
       popoverContent?: ReactNode;
       searchText?: string;
+      supportedModes?: SkillPolicyMode[];
       title: ReactNode;
     }): SkillMenuItem =>
       ({
@@ -702,12 +540,19 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
         label: renderToolLabel(
           id,
           title,
-          renderPolicyMenu(id, deleteConfig, configureConfig),
+          renderPolicyMenu(id, {
+            configureConfig,
+            defaultMode,
+            deleteConfig,
+            modeOverride,
+            panelExtra,
+            supportedModes,
+          }),
           badge,
           icon,
           extraTag,
+          popoverContent,
         ),
-        popoverContent,
         searchText: searchText || String(title || id),
       }) as SkillMenuItem,
     [renderPolicyMenu, renderToolLabel],
@@ -765,11 +610,22 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     [allComposioServers],
   );
 
-  // Get all Composio server type identifier sets (used for filtering builtinList)
-  // Using COMPOSIO_APP_TYPES instead of connected servers here, because we want to filter out all possible Composio types
-  const allComposioTypeIdentifiers = useMemo(
-    () => new Set(COMPOSIO_APP_TYPES.map((type) => type.identifier)),
-    [],
+  const connectorCatalog = useMemo(
+    () =>
+      getConnectorCatalog({
+        composio: isComposioEnabledInEnv,
+        lobehub: isLobehubSkillEnabled,
+      }),
+    [isComposioEnabledInEnv, isLobehubSkillEnabled],
+  );
+  const connectorIdentifiers = useMemo(
+    () =>
+      new Set(
+        connectorCatalog.map((item) =>
+          item.type === 'lobehub' ? item.provider.id : item.serverType.identifier,
+        ),
+      ),
+    [connectorCatalog],
   );
   // Get all skill identifier sets (used for filtering builtinList)
   const allSkillIdentifiers = useMemo(() => {
@@ -780,14 +636,11 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     return ids;
   }, [installedBuiltinSkills, marketAgentSkills, userAgentSkills]);
 
-  // Filter out Composio tools and skills from builtinList (they will be displayed separately)
+  // Filter out connectors and skills from builtinList (they are displayed separately)
   const filteredBuiltinList = useMemo(() => {
-    let list = builtinList;
-    if (isComposioEnabledInEnv) {
-      list = list.filter((item) => !allComposioTypeIdentifiers.has(item.identifier));
-    }
+    const list = builtinList.filter((item) => !connectorIdentifiers.has(item.identifier));
     return list.filter((item) => !allSkillIdentifiers.has(item.identifier));
-  }, [builtinList, allComposioTypeIdentifiers, isComposioEnabledInEnv, allSkillIdentifiers]);
+  }, [builtinList, connectorIdentifiers, allSkillIdentifiers]);
 
   // Get recommended Composio skill IDs
   const recommendedComposioIds = useMemo(
@@ -819,6 +672,32 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     [allLobehubSkillServers],
   );
 
+  const visibleComposioTypes = useMemo(
+    () =>
+      connectorCatalog
+        .filter((item) => item.type === 'composio')
+        .map(({ serverType }) => serverType)
+        .filter(
+          (type) =>
+            installedComposioIds.has(type.identifier) ||
+            recommendedComposioIds.has(type.identifier) ||
+            checkedSet.has(type.identifier) ||
+            disabledIdSet.has(type.identifier),
+        ),
+    [connectorCatalog, installedComposioIds, recommendedComposioIds, checkedSet, disabledIdSet],
+  );
+  const visibleLobehubProviders = useMemo(
+    () =>
+      connectorCatalog
+        .filter((item) => item.type === 'lobehub')
+        .map(({ provider }) => provider)
+        .filter(
+          (provider) =>
+            installedLobehubIds.has(provider.id) || recommendedLobehubIds.has(provider.id),
+        ),
+    [connectorCatalog, installedLobehubIds, recommendedLobehubIds],
+  );
+
   // Remove a Composio connection AND drop its identifier from the agent's
   // plugins. `ComposioServerItem.handleConnect` optimistically adds the new
   // server id to `plugins` before OAuth completes, so deleting the connection
@@ -841,16 +720,12 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
 
   // Composio server list items - show installed, recommended, or any id that
   // still lingers in the agent's plugins (so an orphaned, never-authorized
-  // entry can be removed even when it isn't a recommended app).
+  // entry can be removed even when it isn't a recommended app). "Lingers"
+  // means present at all — pinned or disabled, not just pinned.
   const composioServerItems = useMemo(
     () =>
       isComposioEnabledInEnv
-        ? COMPOSIO_APP_TYPES.filter(
-            (type) =>
-              installedComposioIds.has(type.identifier) ||
-              recommendedComposioIds.has(type.identifier) ||
-              checkedSet.has(type.identifier),
-          ).map((type) => {
+        ? visibleComposioTypes.map((type) => {
             const server = getServerByName(type.identifier);
             const icon = (
               <ComposioSkillIcon icon={type.icon} label={type.label} size={SKILL_ICON_SIZE} />
@@ -887,6 +762,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
               <ComposioServerItem
                 agentId={agentId}
                 appSlug={type.appSlug}
+                icon={icon}
                 identifier={type.identifier}
                 label={type.label}
                 server={server}
@@ -901,18 +777,15 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
             //     plugins (added optimistically, never authorized)
             // so an accidental or failed authorization can always be cleaned up.
             const removableId = server?.identifier ?? type.identifier;
-            if (server || checkedSet.has(type.identifier)) {
+            if (server || checkedSet.has(type.identifier) || disabledIdSet.has(type.identifier)) {
               return {
-                extra: renderPolicyMenu(
-                  removableId,
-                  {
+                extra: renderPolicyMenu(removableId, {
+                  deleteConfig: {
                     displayName: type.label,
                     onDelete: () => removeComposioServer(removableId),
                   },
-                  undefined,
-                  true,
-                ),
-                icon,
+                  deleteOnly: true,
+                }),
                 key: removableId,
                 label: (
                   <span
@@ -931,7 +804,6 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
             }
 
             return {
-              icon,
               key: type.identifier,
               label: serverItem,
               popoverContent,
@@ -941,8 +813,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
         : [],
     [
       isComposioEnabledInEnv,
-      installedComposioIds,
-      recommendedComposioIds,
+      visibleComposioTypes,
       agentId,
       t,
       createManagedSkillItem,
@@ -951,6 +822,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
       renderPolicyMenu,
       openSkillPolicyMenu,
       checkedSet,
+      disabledIdSet,
     ],
   );
 
@@ -958,10 +830,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
   const lobehubSkillItems = useMemo(
     () =>
       isLobehubSkillEnabled
-        ? LOBEHUB_SKILL_PROVIDERS.filter(
-            (provider) =>
-              installedLobehubIds.has(provider.id) || recommendedLobehubIds.has(provider.id),
-          ).map((provider) => {
+        ? visibleLobehubProviders.map((provider) => {
             const server = allLobehubSkillServers.find((s) => s.identifier === provider.id);
             const icon = (
               <LobehubSkillIcon
@@ -995,11 +864,11 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
             }
 
             return {
-              icon,
               key: provider.id, // Use provider.id as key, consistent with pluginId
               label: (
                 <LobehubSkillServerItem
                   agentId={agentId}
+                  icon={icon}
                   label={provider.label}
                   provider={provider.id}
                 />
@@ -1011,9 +880,8 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
         : [],
     [
       isLobehubSkillEnabled,
+      visibleLobehubProviders,
       allLobehubSkillServers,
-      installedLobehubIds,
-      recommendedLobehubIds,
       agentId,
       t,
       createManagedSkillItem,
@@ -1072,9 +940,75 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     [filteredBuiltinList, t, createManagedSkillItem, uninstallBuiltinTool],
   );
 
-  // Application-fixed tool items (read-only). Always-on tools owned by the runtime
-  // (lobe-agent + always-on infra), so they get a fixed indicator instead of the policy
-  // menu and can't be switched to "auto" or uninstalled.
+  // Memory / web browsing rows. Both are builtin tools the engine turns on from
+  // chatConfig, so their on/off state is derived from — and written back to — that
+  // same config, while the optional pin is recorded in `agents.plugins` like every
+  // other skill: they get the full Pinned/Auto/Disable policy. Their own settings
+  // travel with the row (`panelExtra`), because the "+" menu no longer hosts them.
+  const capabilityItems: SkillMenuItem[] = useMemo(
+    () =>
+      [
+        {
+          enabled: isMemoryCapabilityEnabled,
+          manifest: MemoryManifest,
+          panelExtra: <MemoryEffortControl />,
+          supportedModes: CAPABILITY_MODES,
+        },
+        {
+          enabled: isSearchCapabilityEnabled,
+          manifest: WebBrowsingManifest,
+          panelExtra: <SearchAdvancedControls />,
+          supportedModes: searchCapabilityModes,
+        },
+      ].map(({ enabled, manifest, panelExtra, supportedModes }) => {
+        const { identifier } = manifest;
+        const avatar = manifest.meta?.avatar;
+        const title = t(`tools.builtins.${identifier}.title` as any, { defaultValue: identifier });
+
+        return createManagedSkillItem({
+          extraTag: officialTag,
+          icon: avatar ? (
+            <Avatar avatar={avatar} shape={'square'} size={SKILL_ICON_SIZE} />
+          ) : (
+            <Icon icon={SkillsIcon} size={SKILL_ICON_SIZE} />
+          ),
+          id: identifier,
+          modeOverride: resolveCapabilityMode(enabled, checkedSet.has(identifier)),
+          panelExtra,
+          popoverContent: (
+            <ToolItemDetailPopover
+              identifier={identifier}
+              sourceLabel={t('skillStore.tabs.lobehub')}
+              title={title}
+              description={t(`tools.builtins.${identifier}.description` as any, {
+                defaultValue: '',
+              })}
+              icon={
+                avatar ? (
+                  <Avatar avatar={avatar} shape={'square'} size={36} />
+                ) : (
+                  <Icon icon={SkillsIcon} size={36} />
+                )
+              }
+            />
+          ),
+          searchText: `${title} ${identifier}`,
+          supportedModes,
+          title,
+        });
+      }),
+    [
+      checkedSet,
+      createManagedSkillItem,
+      isMemoryCapabilityEnabled,
+      isSearchCapabilityEnabled,
+      searchCapabilityModes,
+      t,
+    ],
+  );
+
+  // Builtin runtime tools support an explicit pinned/disabled policy. They intentionally
+  // do not support "auto": when enabled, these foundational capabilities stay pinned.
   const fixedItems = useMemo(
     () =>
       fixedDisplayList.map((item) => {
@@ -1109,33 +1043,19 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
           />
         );
 
-        return {
-          closeOnClick: false,
-          key: item.identifier,
-          label: (
-            <span className={cx(styles.toolRow)}>
-              <span className={cx(styles.toolLabel)}>
-                {icon}
-                <span className={cx(styles.toolLabelText)}>{title}</span>
-                {officialTag}
-              </span>
-              <span className={cx(styles.toolTrailing)}>
-                <span className={cx(styles.typeTag)}>
-                  <Icon icon={Wrench} size={12} />
-                </span>
-                <Tooltip placement={'top'} title={t('tools.activation.fixed.hint')}>
-                  <span className={cx(styles.fixedIndicator)}>
-                    <Icon icon={Pin} size={15} />
-                  </span>
-                </Tooltip>
-              </span>
-            </span>
-          ),
+        return createManagedSkillItem({
+          badge: <Icon icon={Wrench} size={12} />,
+          defaultMode: 'pinned',
+          extraTag: officialTag,
+          icon,
+          id: item.identifier,
           popoverContent,
           searchText: `${title} ${item.identifier}`,
-        } as SkillMenuItem;
+          supportedModes: ['pinned', 'disabled'],
+          title,
+        });
       }),
-    [fixedDisplayList, t],
+    [createManagedSkillItem, fixedDisplayList, t],
   );
 
   // Builtin Agent Skills list items (grouped under LobeHub)
@@ -1269,6 +1189,20 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
 
         return createManagedSkillItem({
           badge: <Icon icon={McpIcon} size={12} />,
+          configureConfig: { onConfigure: () => openConnectorEditDrawer(connector.id) },
+          deleteConfig: {
+            displayName: title,
+            onDelete: async () => {
+              await deleteConnector(connector.id);
+              // Mirror removeComposioServer: drop the identifier from agent.plugins so
+              // no orphaned pin survives the connector deletion.
+              try {
+                await togglePlugin(connector.identifier, false);
+              } catch (error) {
+                console.error('[Connector] Failed to unpin plugin after delete:', error);
+              }
+            },
+          },
           icon,
           id: connector.identifier,
           popoverContent,
@@ -1276,7 +1210,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
           title,
         });
       }),
-    [customConnectors, t, createManagedSkillItem],
+    [customConnectors, t, createManagedSkillItem, deleteConnector, togglePlugin],
   );
 
   // Skills list items (including LobeHub Skill and Composio)
@@ -1327,6 +1261,10 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     const isMcp = item?.runtimeType === 'mcp';
     const hasRealAvatar = !!item?.avatar && item.avatar !== 'MCP_AVATAR';
     const isCustom = item.type === 'customPlugin';
+    // Community rows installed server-side may carry no `meta.title`; never
+    // render an empty label — fall back to the identifier like every other
+    // group in this menu does.
+    const title = item.title || item.identifier;
     const icon = hasRealAvatar ? (
       <Avatar avatar={item.avatar} shape={'square'} size={SKILL_ICON_SIZE} />
     ) : (
@@ -1337,7 +1275,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
         description={item.description}
         identifier={item.identifier}
         sourceLabel={isCustom ? t('skillStore.tabs.custom') : t('skillStore.tabs.community')}
-        title={item.title}
+        title={title}
         icon={
           hasRealAvatar ? (
             <Avatar
@@ -1356,10 +1294,10 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     return createManagedSkillItem({
       badge: isMcp ? <Icon icon={McpIcon} size={12} /> : undefined,
       configureConfig: isCustom
-        ? { onConfigure: () => setEditingPluginId(item.identifier) }
+        ? { onConfigure: () => openPluginEditDrawer(item.identifier) }
         : undefined,
       deleteConfig: {
-        displayName: item.title ?? item.identifier,
+        displayName: title,
         onDelete: () => uninstallPlugin(item.identifier),
       },
       extraTag: isCustom ? (
@@ -1372,8 +1310,8 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
       icon,
       id: item.identifier,
       popoverContent,
-      searchText: `${item.title} ${item.identifier}`,
-      title: item.title,
+      searchText: `${title} ${item.identifier}`,
+      title,
     });
   };
 
@@ -1428,10 +1366,47 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     );
   };
   const allPinnedItems = allSkillItems.filter((item) => checkedSet.has(String(item.key)));
-  const allAutoItems = allSkillItems.filter((item) => !checkedSet.has(String(item.key)));
-  // App-fixed tools always lead the pinned section, ahead of user-pinned plugins.
-  const pinnedItems = filterBySearch([...fixedItems, ...allPinnedItems]);
+  // Capability rows split on the same two states as every other row: Pinned (the
+  // explicit pin, stored in `plugins`) and the on/off half that lives in chatConfig.
+  const capabilityPinnedItems = capabilityItems.filter((item) => checkedSet.has(String(item.key)));
+  const capabilityAutoItems = capabilityItems.filter(
+    (item) => !checkedSet.has(String(item.key)) && !disabledCapabilityIds.has(String(item.key)),
+  );
+  const capabilityDisabledItems = capabilityItems.filter(
+    (item) => !checkedSet.has(String(item.key)) && disabledCapabilityIds.has(String(item.key)),
+  );
+  // LobeHub's own Agent Skills (Artifacts, …) — the rows the capability rows follow.
+  const builtinAgentSkillIds = useMemo(
+    () => new Set(installedBuiltinSkills.map((skill) => skill.identifier)),
+    [installedBuiltinSkills],
+  );
+  const activeSkillItems = allSkillItems.filter(
+    (item) => !checkedSet.has(String(item.key)) && !disabledIdSet.has(String(item.key)),
+  );
+  const isAgentSkillItem = (item: SkillMenuItem) => builtinAgentSkillIds.has(String(item.key));
+  // Capability rows sit after LobeHub's Agent Skills and before the remaining
+  // integrations, so the group still opens with the skills the user installed.
+  const allAutoItems = [
+    ...activeSkillItems.filter((item) => isAgentSkillItem(item)),
+    ...capabilityAutoItems,
+    ...activeSkillItems.filter((item) => !isAgentSkillItem(item)),
+  ];
+  const allDisabledItems = [
+    ...capabilityDisabledItems,
+    ...allSkillItems.filter((item) => disabledIdSet.has(String(item.key))),
+  ];
+  const fixedPinnedItems = fixedItems.filter((item) => !disabledIdSet.has(String(item.key)));
+  const fixedDisabledItems = fixedItems.filter((item) => disabledIdSet.has(String(item.key)));
+  // Fixed tools lead the pinned section, then pinned capabilities, then every pinned
+  // skill. All disabled tools and skills live in their own section so "Auto" remains
+  // semantically accurate.
+  const pinnedItems = filterBySearch([
+    ...fixedPinnedItems,
+    ...capabilityPinnedItems,
+    ...allPinnedItems,
+  ]);
   const autoItems = filterBySearch(allAutoItems);
+  const disabledItems = filterBySearch([...fixedDisabledItems, ...allDisabledItems]);
 
   const renderActivationGroupLabel = ({
     autoSwitch,
@@ -1450,7 +1425,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
   }) => (
     <div
       data-skill-activation-group
-      className={cx(styles.activationGroupHeader)}
+      {...stylex.props(styles.activationGroupHeader)}
       role="button"
       tabIndex={0}
       onClick={(event) => {
@@ -1458,15 +1433,17 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
         onToggle();
       }}
     >
-      <div className={cx(styles.activationGroupTitleBlock)}>
-        {icon}
-        <span className={cx(styles.activationGroupTitleText)}>{title}</span>
-        {typeof count === 'number' && <span className={cx(styles.count)}>{count}</span>}
+      <div {...stylex.props(styles.activationGroupTitleBlock)}>
+        <span {...stylex.props(styles.activationGroupIcon)}>{icon}</span>
+        <span {...stylex.props(styles.activationGroupTitleBody)}>
+          <span {...stylex.props(styles.activationGroupTitleText)}>{title}</span>
+          {typeof count === 'number' && <span {...stylex.props(styles.count)}>{count}</span>}
+        </span>
       </div>
-      <div className={cx(styles.activationGroupActions)}>
+      <div {...stylex.props(styles.activationGroupActions)}>
         {autoSwitch && (
           <span
-            className={cx(styles.switchWrap)}
+            {...stylex.props(styles.switchWrap)}
             onClick={(event) => {
               event.stopPropagation();
             }}
@@ -1492,7 +1469,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
             />
           </span>
         )}
-        <div className={cx(styles.activationGroupChevron)}>
+        <div {...stylex.props(styles.activationGroupChevron)}>
           <Icon icon={open ? ChevronDown : ChevronRight} size={13} />
         </div>
       </div>
@@ -1519,7 +1496,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
       <>
         <button
           aria-label={t('plus.addSkills', { ns: 'chat' })}
-          className={cx(styles.addSkillRow)}
+          {...stylex.props(styles.addSkillRow)}
           type="button"
           onClick={(event) => {
             event.stopPropagation();
@@ -1528,20 +1505,20 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
           }}
         >
           <Icon icon={Store} size={SKILL_ICON_SIZE} />
-          <span className={cx(styles.addSkillLabel)}>{t('plus.addSkills', { ns: 'chat' })}</span>
+          <span {...stylex.props(styles.addSkillLabel)}>{t('plus.addSkills', { ns: 'chat' })}</span>
         </button>
         <button
           aria-label={t('tools.plugins.management')}
-          className={cx(styles.addSkillRow)}
+          {...stylex.props(styles.addSkillRow)}
           type="button"
           onClick={(event) => {
             event.stopPropagation();
             closeDropdown?.();
-            navigate('/settings/skill');
+            navigate('/settings/connector');
           }}
         >
           <Icon icon={Settings} size={SKILL_ICON_SIZE} />
-          <span className={cx(styles.addSkillLabel)}>{t('tools.plugins.management')}</span>
+          <span {...stylex.props(styles.addSkillLabel)}>{t('tools.plugins.management')}</span>
         </button>
       </>
     ) : undefined;
@@ -1553,7 +1530,7 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
             children: pinnedOpen ? pinnedItems : [],
             key: 'pinned',
             label: renderActivationGroupLabel({
-              count: allPinnedItems.length,
+              count: fixedPinnedItems.length + capabilityPinnedItems.length + allPinnedItems.length,
               icon: <Icon icon={Pin} size={14} />,
               open: pinnedOpen,
               title: t('tools.activation.pinned'),
@@ -1583,6 +1560,30 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
               open: autoOpen,
               title: t('tools.activation.auto'),
               onToggle: () => setAutoOpen((open) => !open),
+            }),
+            type: 'group' as const,
+          } as ItemType,
+        ]
+      : []),
+    ...(disabledItems.length > 0 && (pinnedItems.length > 0 || autoItems.length > 0)
+      ? [
+          {
+            key: 'skill-disabled-divider',
+            type: 'divider' as const,
+          } as ItemType,
+        ]
+      : []),
+    ...(disabledItems.length > 0
+      ? [
+          {
+            children: disabledOpen ? disabledItems : [],
+            key: 'disabled',
+            label: renderActivationGroupLabel({
+              count: fixedDisabledItems.length + allDisabledItems.length,
+              icon: <Icon icon={Ban} size={14} />,
+              open: disabledOpen,
+              title: t('tools.activation.disabled'),
+              onToggle: () => setDisabledOpen((open) => !open),
             }),
             type: 'group' as const,
           } as ItemType,
@@ -1917,35 +1918,13 @@ export const useControls = ({ closeDropdown }: { closeDropdown?: () => void } = 
     t,
   ]);
 
-  const editPluginDrawer = (
-    <DevModal
-      mode={'edit'}
-      open={!!editingPluginId}
-      value={editingCustomPlugin}
-      onValueChange={updateNewCustomPlugin}
-      onDelete={() => {
-        if (!canEdit) return;
-        if (editingPluginId) uninstallPlugin(editingPluginId);
-        setEditingPluginId(null);
-      }}
-      onOpenChange={(open) => {
-        if (!open) setEditingPluginId(null);
-      }}
-      onSave={async (devPlugin) => {
-        if (!canEdit) return;
-        await installCustomPlugin(devPlugin);
-        setEditingPluginId(null);
-      }}
-    />
-  );
-
   return {
     autoCount: allAutoItems.length,
-    editPluginDrawer,
     installedPluginItems,
+    isPolicyMenuOpen: policyOpenId !== null,
     marketFooter,
     marketHeader,
     marketItems,
-    pinnedCount: allPinnedItems.length + fixedItems.length,
+    pinnedCount: allPinnedItems.length + fixedPinnedItems.length + capabilityPinnedItems.length,
   };
 };

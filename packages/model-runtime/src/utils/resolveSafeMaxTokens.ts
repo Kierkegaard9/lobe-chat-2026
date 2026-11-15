@@ -1,6 +1,6 @@
-import { type AiFullModelCard } from 'model-bank';
-import { estimateTokenCount } from 'tokenx';
+import type { AiFullModelCard } from 'model-bank';
 
+import { estimateOpenAIChatInputTokens } from '../core/usageConverters';
 import type { ChatStreamPayload } from '../types/chat';
 
 /**
@@ -32,7 +32,7 @@ export interface ResolveSafeMaxTokensOptions {
 /**
  * Thrown when the estimated prompt tokens leave less room than
  * `minOutputTokens` for completion (or already exceed the model's context
- * window). Caught by `openaiCompatibleFactory` and surfaced as an
+ * window). Caught by `openaiCompatible` and surfaced as an
  * `ExceededContextWindow` chat error carrying structured diagnostic fields
  * — see for the rationale of failing fast instead of issuing a
  * doomed upstream request.
@@ -91,9 +91,7 @@ export class ContextExceededPreFlightError extends Error {
 
 const estimatePayloadInputTokens = (payload: Pick<ChatStreamPayload, 'messages' | 'tools'>) => {
   const { messages = [], tools } = payload;
-  const messagesText = JSON.stringify(messages);
-  const toolsText = tools && tools.length > 0 ? JSON.stringify(tools) : '';
-  return estimateTokenCount(messagesText) + (toolsText ? estimateTokenCount(toolsText) : 0);
+  return estimateOpenAIChatInputTokens(messages, { tools }).totalTokens;
 };
 
 /**

@@ -8,6 +8,19 @@ import { merge } from '@/utils/merge';
 
 import { topicSelectors } from './selectors';
 
+const topicState = <T>(key: string, topics: T[], total: number) => ({
+  topicDataMap: {
+    [key]: {
+      items: topics,
+      total,
+      currentPage: 0,
+      hasMore: false,
+      pageSize: 20,
+    },
+  },
+  activeAgentId: 'test',
+});
+
 // Mock i18next
 vi.mock('i18next', () => ({
   t: vi.fn().mockImplementation((key) => key),
@@ -45,6 +58,123 @@ describe('topicSelectors', () => {
 
       const topics = topicSelectors.currentTopics(state);
       expect(topics).toEqual(topicItems);
+    });
+  });
+
+  describe('reasoning + hetero pins', () => {
+    const pinTopicDataMap = createTopicDataMap('test');
+    pinTopicDataMap[topicMapKey({ agentId: 'test' })].items = [
+      {
+        id: 'pinned',
+        metadata: { reasoningConfig: { reasoningEffort: 'high' } },
+        model: 'gpt-5',
+        name: 'Pinned',
+        provider: 'openai',
+      },
+      { id: 'legacy', model: 'gpt-5', name: 'Legacy', provider: 'openai' },
+      { id: 'noModel', metadata: { reasoningConfig: {} }, name: 'No Model' },
+      {
+        id: 'heteroBoth',
+        metadata: { heteroEffort: 'max' },
+        model: 'opus',
+        name: 'Hetero',
+        provider: 'claude-code',
+      },
+      { id: 'heteroEffortOnly', metadata: { heteroEffort: 'default' }, name: 'Hetero effort' },
+      { id: 'heteroNone', name: 'Hetero none' },
+    ] as any;
+    const state = merge(initialStore, { topicDataMap: pinTopicDataMap, activeAgentId: 'test' });
+
+    it('getTopicReasoningPinById returns the pinned model with its reasoning config', () => {
+      expect(topicSelectors.getTopicReasoningPinById('pinned')(state)).toEqual({
+        model: 'gpt-5',
+        provider: 'openai',
+        reasoningConfig: { reasoningEffort: 'high' },
+      });
+      expect(topicSelectors.getTopicReasoningPinById('legacy')(state)).toEqual({
+        model: 'gpt-5',
+        provider: 'openai',
+        reasoningConfig: undefined,
+      });
+      expect(topicSelectors.getTopicReasoningPinById('noModel')(state)).toBeUndefined();
+    });
+
+    it('getTopicReasoningConfigForModel only honors a pin taken for the same model', () => {
+      expect(
+        topicSelectors.getTopicReasoningConfigForModel('pinned', 'gpt-5', 'openai')(state),
+      ).toEqual({ reasoningEffort: 'high' });
+      // a sub-agent modelOverride must not inherit the parent topic's effort
+      expect(
+        topicSelectors.getTopicReasoningConfigForModel('pinned', 'gpt-4', 'openai')(state),
+      ).toBeUndefined();
+      expect(
+        topicSelectors.getTopicReasoningConfigForModel('pinned', 'gpt-5', 'azure')(state),
+      ).toBeUndefined();
+      expect(
+        topicSelectors.getTopicReasoningConfigForModel('legacy', 'gpt-5', 'openai')(state),
+      ).toBeUndefined();
+    });
+
+    it('getTopicHeteroPinById combines the model columns with the effort pin', () => {
+      expect(topicSelectors.getTopicHeteroPinById('heteroBoth')(state)).toEqual({
+        effort: 'max',
+        model: 'opus',
+        provider: 'claude-code',
+      });
+      expect(topicSelectors.getTopicHeteroPinById('heteroEffortOnly')(state)).toEqual({
+        effort: 'default',
+      });
+      expect(topicSelectors.getTopicHeteroPinById('heteroNone')(state)).toBeUndefined();
+      expect(topicSelectors.getTopicHeteroPinById('missing')(state)).toBeUndefined();
+    });
+
+    it('activeTopicHeteroPin follows the active topic', () => {
+      expect(topicSelectors.activeTopicHeteroPin(state)).toBeUndefined();
+      expect(
+        topicSelectors.activeTopicHeteroPin(merge(state, { activeTopicId: 'heteroBoth' })),
+      ).toEqual({ effort: 'max', model: 'opus', provider: 'claude-code' });
+    });
+  });
+
+  describe('getTopicModelById / activeTopicModel', () => {
+    const modelTopicDataMap = createTopicDataMap('test');
+    modelTopicDataMap[topicMapKey({ agentId: 'test' })].items = [
+      // Pinned model lives in the top-level `model`/`provider` columns, not metadata.
+      { id: 'withModel', name: 'With Model', model: 'gpt-5', provider: 'openai' },
+      { id: 'noModel', name: 'No Model' },
+      { id: 'modelOnly', name: 'Model Only', model: 'claude-opus-4-8' },
+    ] as any;
+
+    it('returns the model/provider pinned to a topic', () => {
+      const state = merge(initialStore, { topicDataMap: modelTopicDataMap, activeAgentId: 'test' });
+      expect(topicSelectors.getTopicModelById('withModel')(state)).toEqual({
+        model: 'gpt-5',
+        provider: 'openai',
+      });
+    });
+
+    it('defaults provider to empty string when only model is recorded', () => {
+      const state = merge(initialStore, { topicDataMap: modelTopicDataMap, activeAgentId: 'test' });
+      expect(topicSelectors.getTopicModelById('modelOnly')(state)).toEqual({
+        model: 'claude-opus-4-8',
+        provider: '',
+      });
+    });
+
+    it('returns undefined when the topic has no model recorded', () => {
+      const state = merge(initialStore, { topicDataMap: modelTopicDataMap, activeAgentId: 'test' });
+      expect(topicSelectors.getTopicModelById('noModel')(state)).toBeUndefined();
+    });
+
+    it('activeTopicModel reads the active topic model, undefined when no active topic', () => {
+      const base = merge(initialStore, { topicDataMap: modelTopicDataMap, activeAgentId: 'test' });
+      expect(topicSelectors.activeTopicModel(base)).toBeUndefined();
+
+      const active = merge(base, { activeTopicId: 'withModel' });
+      expect(topicSelectors.activeTopicModel(active)).toEqual({
+        model: 'gpt-5',
+        provider: 'openai',
+      });
     });
   });
 
@@ -117,10 +247,59 @@ describe('topicSelectors', () => {
     });
   });
 
+  describe('currentTopicDeviceId', () => {
+    const stateWithTopicMetadata = (topicMeta: Record<string, unknown> | undefined) =>
+      merge(initialStore, {
+        ...topicState(
+          topicMapKey({ agentId: 'test' }),
+          [{ id: 'topic-device', metadata: topicMeta }],
+          1,
+        ),
+        activeTopicId: 'topic-device',
+      }) as ChatStore;
+
+    it('prefers the running operation device over the bound device', () => {
+      const state = stateWithTopicMetadata({
+        boundDeviceId: 'device-bound',
+        runningOperation: { deviceId: 'device-running', operationId: 'op-1' },
+      });
+
+      expect(topicSelectors.currentTopicDeviceId(state)).toBe('device-running');
+    });
+
+    it('falls back to the bound device when no run is in flight', () => {
+      const state = stateWithTopicMetadata({
+        boundDeviceId: 'device-bound',
+        runningOperation: null,
+      });
+
+      expect(topicSelectors.currentTopicDeviceId(state)).toBe('device-bound');
+    });
+
+    it('returns undefined when the topic has neither', () => {
+      expect(topicSelectors.currentTopicDeviceId(stateWithTopicMetadata({}))).toBeUndefined();
+      expect(
+        topicSelectors.currentTopicDeviceId(stateWithTopicMetadata(undefined)),
+      ).toBeUndefined();
+      expect(topicSelectors.currentTopicDeviceId(initialStore)).toBeUndefined();
+    });
+  });
+
   describe('currentActiveTopic', () => {
     it('should return undefined if there is no active topic', () => {
       const topic = topicSelectors.currentActiveTopic(initialStore);
       expect(topic).toBeUndefined();
+    });
+
+    it('should tolerate a partial store state without the detail cache', () => {
+      const state = {
+        activeAgentId: 'test',
+        activeTopicId: 'missing-topic',
+        topicDataMap: {},
+      } as ChatStore;
+
+      expect(topicSelectors.currentActiveTopic(state)).toBeUndefined();
+      expect(topicSelectors.getTopicById('missing-topic')(state)).toBeUndefined();
     });
 
     it('should return the current active topic', () => {
@@ -131,6 +310,42 @@ describe('topicSelectors', () => {
       });
       const topic = topicSelectors.currentActiveTopic(state);
       expect(topic).toEqual(topicItems[0]);
+    });
+
+    it('should fall back to the detail cache when the topic is missing from the list bucket', () => {
+      // An archived (completed) topic is excluded from the sidebar list fetch,
+      // so it never lands in topicDataMap — only in the by-id detail cache.
+      const archived = { id: 'archived1', title: 'Archived topic', status: 'completed' };
+      const state = merge(initialStore, {
+        topicDataMap,
+        topicDetailMap: { archived1: archived },
+        activeAgentId: 'test',
+        activeTopicId: 'archived1',
+      });
+      expect(topicSelectors.currentActiveTopic(state)).toEqual(archived);
+    });
+
+    it('should prefer the list bucket row over the detail cache', () => {
+      const state = merge(initialStore, {
+        topicDataMap,
+        topicDetailMap: { topic1: { id: 'topic1', title: 'stale detail' } },
+        activeAgentId: 'test',
+        activeTopicId: 'topic1',
+      });
+      expect(topicSelectors.currentActiveTopic(state)).toEqual(topicItems[0]);
+    });
+  });
+
+  describe('getTopicById', () => {
+    it('should fall back to the detail cache when the topic is missing from the list bucket', () => {
+      const archived = { id: 'archived1', title: 'Archived topic', status: 'completed' };
+      const state = merge(initialStore, {
+        topicDataMap,
+        topicDetailMap: { archived1: archived },
+        activeAgentId: 'test',
+      });
+      expect(topicSelectors.getTopicById('archived1')(state)).toEqual(archived);
+      expect(topicSelectors.getTopicById('topic1')(state)).toEqual(topicItems[0]);
     });
   });
 
@@ -148,14 +363,71 @@ describe('topicSelectors', () => {
       const topics = topicSelectors.displayTopics(state);
       expect(topics).toEqual(topicItems);
     });
+
+    it('should hide every system-owned trigger, not just cron', () => {
+      // A panel fetching the same agent with looser filters (goal chat, task
+      // manager, page copilot) overwrites this bucket, so the list surfaces
+      // must not render whatever lands in it.
+      const polluted = [
+        ...topicItems,
+        { id: 'cron1', name: 'Cron', trigger: 'cron' },
+        { id: 'task1', name: 'Task run', trigger: 'task' },
+        { id: 'doc1', name: 'Doc chat', trigger: 'document' },
+        { id: 'eval1', name: 'Eval', trigger: 'eval' },
+        { id: 'channel1', name: 'Channel run', trigger: 'channel' },
+      ];
+      const state = merge(initialStore, {
+        activeAgentId: 'test',
+        topicDataMap: {
+          [topicMapKey({ agentId: 'test' })]: {
+            currentPage: 0,
+            hasMore: false,
+            items: polluted,
+            pageSize: 20,
+            total: polluted.length,
+          },
+        },
+      });
+
+      expect(topicSelectors.displayTopics(state)).toEqual(topicItems);
+      expect(topicSelectors.currentTopicLength(state)).toBe(topicItems.length);
+    });
   });
 
   describe('searchTopics', () => {
+    it('hides cached channel results while keeping their detail accessible', () => {
+      const channelTopic = { ...topicItems[0], id: 'channel1', trigger: 'channel' };
+      const state = merge(initialStore, {
+        activeAgentId: 'test',
+        activeTopicId: channelTopic.id,
+        searchTopics: [...topicItems, channelTopic],
+        topicDetailMap: { [channelTopic.id]: channelTopic },
+      });
+
+      expect(topicSelectors.searchTopics(state)).toEqual(topicItems);
+      expect(topicSelectors.currentActiveTopic(state)).toEqual(channelTopic);
+    });
+
     it('should return search topics if searching', () => {
       const searchTopics = [{ id: 'search1', name: 'Search 1' }];
       const state = merge(initialStore, { inSearchingMode: true, searchTopics });
       const topics = topicSelectors.searchTopics(state);
       expect(topics).toEqual(searchTopics);
+    });
+  });
+
+  describe('agentTopicsViewTopics', () => {
+    it('hides channel topics in the management list without hiding other trigger types', () => {
+      const taskTopic = { ...topicItems[0], id: 'task1', trigger: 'task' };
+      const channelTopic = { ...topicItems[0], id: 'channel1', trigger: 'channel' };
+      const state = merge(initialStore, {
+        activeAgentId: 'test',
+        agentTopicsViewMap: {
+          [topicMapKey({ agentId: 'test' })]: { items: [...topicItems, taskTopic, channelTopic] },
+        },
+      });
+
+      expect(topicSelectors.agentTopicsViewTopics(state)).toEqual([...topicItems, taskTopic]);
     });
   });
 
@@ -170,6 +442,66 @@ describe('topicSelectors', () => {
       const state = merge(initialStore, { topicDataMap, activeAgentId: 'test' });
       const topic = topicSelectors.getTopicById('topic1')(state);
       expect(topic).toEqual(topicItems[0]);
+    });
+
+    it('should find a topic loaded under another agent for split desktop panes', () => {
+      const backgroundTopic = { id: 'background-topic', name: 'Background topic' };
+      const state = merge(initialStore, {
+        activeAgentId: 'focused-agent',
+        topicDataMap: {
+          ...createTopicDataMap('focused-agent'),
+          [topicMapKey({ agentId: 'background-agent' })]: {
+            currentPage: 0,
+            hasMore: false,
+            items: [backgroundTopic],
+            pageSize: 20,
+            total: 1,
+          },
+        },
+      });
+
+      expect(topicSelectors.getTopicById('background-topic')(state)).toEqual(backgroundTopic);
+    });
+  });
+
+  describe('getTopicWorkingDirectory', () => {
+    // Two topics with distinct working directories; A is the active topic.
+    const wdTopics = [
+      { id: 'topicA', metadata: { workingDirectory: '/project-a' }, name: 'A' },
+      { id: 'topicB', metadata: { workingDirectory: '/project-b' }, name: 'B' },
+    ];
+    const wdState = merge(initialStore, {
+      activeAgentId: 'test',
+      activeTopicId: 'topicA',
+      topicDataMap: {
+        [topicMapKey({ agentId: 'test' })]: {
+          currentPage: 0,
+          hasMore: false,
+          items: wdTopics,
+          pageSize: 20,
+          total: wdTopics.length,
+        },
+      },
+    }) as ChatStore;
+
+    // Regression: while topic A is active, a tool call captured for topic B must
+    // resolve B's directory — not A's — so a mid-stream topic switch can't make
+    // grep search the wrong project.
+    it('binds to the requested topic id, not the active topic', () => {
+      expect(topicSelectors.getTopicWorkingDirectory('topicB')(wdState)).toBe('/project-b');
+      expect(topicSelectors.getTopicWorkingDirectory('topicA')(wdState)).toBe('/project-a');
+    });
+
+    it('falls back to the active topic when no id is given', () => {
+      expect(topicSelectors.getTopicWorkingDirectory()(wdState)).toBe('/project-a');
+    });
+
+    it('treats an explicit null as a new-topic route without a directory', () => {
+      expect(topicSelectors.getTopicWorkingDirectory(null)(wdState)).toBeUndefined();
+    });
+
+    it('returns undefined for an unknown topic id', () => {
+      expect(topicSelectors.getTopicWorkingDirectory('nope')(wdState)).toBeUndefined();
     });
   });
 
@@ -186,18 +518,10 @@ describe('topicSelectors', () => {
         { id: 'topic2', name: 'Topic 2', favorite: false, createAt: '2023-01-01' },
       ];
 
-      const state = merge(initialStore, {
-        topicDataMap: {
-          [topicMapKey({ agentId: 'test' })]: {
-            items: topics,
-            total: topics.length,
-            currentPage: 0,
-            hasMore: false,
-            pageSize: 20,
-          },
-        },
-        activeAgentId: 'test',
-      });
+      const state = merge(
+        initialStore,
+        topicState(topicMapKey({ agentId: 'test' }), topics, topics.length),
+      );
 
       const grouped = topicSelectors.groupedTopicsSelector()(state);
       expect(grouped).toHaveLength(1); // One time-based group
@@ -211,18 +535,10 @@ describe('topicSelectors', () => {
         { id: 'topic3', name: 'Topic 3', favorite: true, createAt: '2023-01-01' },
       ];
 
-      const state = merge(initialStore, {
-        topicDataMap: {
-          [topicMapKey({ agentId: 'test' })]: {
-            items: topics,
-            total: topics.length,
-            currentPage: 0,
-            hasMore: false,
-            pageSize: 20,
-          },
-        },
-        activeAgentId: 'test',
-      });
+      const state = merge(
+        initialStore,
+        topicState(topicMapKey({ agentId: 'test' }), topics, topics.length),
+      );
 
       const grouped = topicSelectors.groupedTopicsSelector()(state);
 
@@ -231,7 +547,7 @@ describe('topicSelectors', () => {
       // Check favorite group
       expect(grouped[0]).toEqual({
         id: 'favorite',
-        title: 'favorite', // This matches the mocked t function return
+        title: 'pinned', // This matches the mocked t function return
         children: topics.filter((t) => t.favorite),
       });
 
@@ -245,26 +561,15 @@ describe('topicSelectors', () => {
         { id: 'topic2', name: 'Topic 2', favorite: false, createAt: '2023-02-01' },
       ];
 
-      const state = merge(initialStore, {
-        topicDataMap: {
-          [topicMapKey({ agentId: 'test' })]: {
-            items: topics,
-            total: topics.length,
-            currentPage: 0,
-            hasMore: false,
-            pageSize: 20,
-          },
-        },
-        activeAgentId: 'test',
-      });
+      const state = merge(
+        initialStore,
+        topicState(topicMapKey({ agentId: 'test' }), topics, topics.length),
+      );
 
       const grouped = topicSelectors.groupedTopicsSelector()(state);
 
       // Should not have a favorites group
       expect(grouped.find((g) => g.id === 'favorite')).toBeUndefined();
-
-      // Should have time-based groups
-      expect(grouped.every((g) => g.id !== 'favorite')).toBeTruthy();
     });
   });
 
@@ -378,6 +683,159 @@ describe('topicSelectors', () => {
     });
   });
 
+  describe('displayTopicsForSidebar', () => {
+    it('does not pin an open channel topic back into the sidebar', () => {
+      const channelTopic = { ...topicItems[0], id: 'channel1', trigger: 'channel' };
+      const state = merge(initialStore, {
+        activeAgentId: 'test',
+        activeTopicId: channelTopic.id,
+        topicDataMap,
+        topicDetailMap: { [channelTopic.id]: channelTopic },
+      });
+
+      expect(topicSelectors.displayTopicsForSidebar(20)(state)).toEqual(topicItems);
+      expect(topicSelectors.currentActiveTopic(state)).toEqual(channelTopic);
+    });
+
+    it('hides completed topics immediately when completed topics are excluded', () => {
+      const now = Date.now();
+      const state = merge(initialStore, {
+        activeAgentId: 'agent-1',
+        topicDataMap: {
+          [topicMapKey({ agentId: 'agent-1' })]: {
+            currentPage: 0,
+            hasMore: false,
+            items: [
+              { createdAt: now, id: 'active', status: 'active', updatedAt: now },
+              { createdAt: now, id: 'completed', status: 'completed', updatedAt: now },
+            ],
+            pageSize: 20,
+            total: 2,
+          },
+        },
+      });
+
+      expect(topicSelectors.displayTopicsForSidebar(20, 'updatedAt', false)(state)).toEqual([
+        expect.objectContaining({ id: 'active' }),
+      ]);
+      expect(topicSelectors.displayTopicsForSidebar(20, 'updatedAt', true)(state)).toHaveLength(2);
+    });
+
+    it('keeps the active topic visible when it falls outside the configured page', () => {
+      const state = merge(initialStore, {
+        activeAgentId: 'agent-1',
+        activeTopicId: 'older-active',
+        topicDataMap: {
+          [topicMapKey({ agentId: 'agent-1' })]: {
+            currentPage: 0,
+            hasMore: true,
+            items: [
+              { id: 'newest', updatedAt: 3 },
+              { id: 'newer', updatedAt: 2 },
+              { id: 'older-active', updatedAt: 1 },
+            ],
+            pageSize: 2,
+            total: 3,
+          },
+        },
+      });
+
+      expect(
+        topicSelectors
+          .displayTopicsForSidebar(
+            2,
+            'updatedAt',
+            false,
+          )(state)
+          ?.map(({ id }) => id),
+      ).toEqual(['newest', 'newer', 'older-active']);
+    });
+
+    it('keeps an active completed topic from the detail cache visible', () => {
+      const state = merge(initialStore, {
+        activeAgentId: 'agent-1',
+        activeTopicId: 'archived-active',
+        topicDataMap: {
+          [topicMapKey({ agentId: 'agent-1' })]: {
+            currentPage: 0,
+            hasMore: true,
+            items: [{ id: 'visible', status: 'active', updatedAt: 2 }],
+            pageSize: 20,
+            total: 2,
+          },
+        },
+        topicDetailMap: {
+          'archived-active': { id: 'archived-active', status: 'completed', updatedAt: 1 },
+        },
+      });
+
+      expect(
+        topicSelectors
+          .displayTopicsForSidebar(
+            20,
+            'updatedAt',
+            false,
+          )(state)
+          ?.map(({ id }) => id),
+      ).toEqual(['visible', 'archived-active']);
+    });
+
+    it('keeps an injected active favorite before regular topics', () => {
+      const state = merge(initialStore, {
+        activeAgentId: 'agent-1',
+        activeTopicId: 'archived-favorite',
+        topicDataMap: {
+          [topicMapKey({ agentId: 'agent-1' })]: {
+            currentPage: 0,
+            hasMore: true,
+            items: [
+              { favorite: true, id: 'visible-favorite', updatedAt: 3 },
+              { id: 'regular', updatedAt: 2 },
+            ],
+            pageSize: 20,
+            total: 3,
+          },
+        },
+        topicDetailMap: {
+          'archived-favorite': {
+            favorite: true,
+            id: 'archived-favorite',
+            status: 'completed',
+            updatedAt: 1,
+          },
+        },
+      });
+
+      expect(
+        topicSelectors
+          .displayTopicsForSidebar(
+            20,
+            'updatedAt',
+            false,
+          )(state)
+          ?.map(({ id }) => id),
+      ).toEqual(['visible-favorite', 'archived-favorite', 'regular']);
+    });
+
+    it('does not duplicate an active topic already in the visible page', () => {
+      const state = merge(initialStore, {
+        activeAgentId: 'agent-1',
+        activeTopicId: 'active',
+        topicDataMap: {
+          [topicMapKey({ agentId: 'agent-1' })]: {
+            currentPage: 0,
+            hasMore: false,
+            items: [{ id: 'active', updatedAt: 1 }],
+            pageSize: 20,
+            total: 1,
+          },
+        },
+      });
+
+      expect(topicSelectors.displayTopicsForSidebar(20)(state)).toHaveLength(1);
+    });
+  });
+
   describe('groupedTopicsForSidebar', () => {
     const now = Date.now();
     const lastYear = dayjs(now).subtract(1, 'year').valueOf();
@@ -400,18 +858,7 @@ describe('topicSelectors', () => {
     ];
 
     const createStateWithTopics = (topics: any[]) =>
-      merge(initialStore, {
-        topicDataMap: {
-          [topicMapKey({ agentId: 'test' })]: {
-            items: topics,
-            total: topics.length,
-            currentPage: 0,
-            hasMore: false,
-            pageSize: 20,
-          },
-        },
-        activeAgentId: 'test',
-      });
+      merge(initialStore, topicState(topicMapKey({ agentId: 'test' }), topics, topics.length));
 
     it('should group by createdAt when sortBy is createdAt', () => {
       const state = createStateWithTopics(topicsWithDifferentTimes);
@@ -495,6 +942,30 @@ describe('topicSelectors', () => {
       // favorites stay pinned at the top; pending follows right below, then the rest
       expect(grouped.map((g) => g.id)).toEqual(['favorite', 'pending', 'active']);
       expect(grouped[1].children.map((t) => t.id)).toEqual(['failed']);
+    });
+
+    it('should group by boundDeviceId in byDevice mode', () => {
+      const state = createStateWithTopics([
+        {
+          id: 'on-device-x',
+          title: 'On device X',
+          favorite: false,
+          metadata: { boundDeviceId: 'device-x' },
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: 'unbound',
+          title: 'Unbound',
+          favorite: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ]);
+
+      const grouped = topicSelectors.groupedTopicsForSidebar(20, 'updatedAt', 'byDevice')(state);
+
+      expect(grouped.map((g) => g.id)).toEqual(['device:device-x', 'no-device']);
     });
   });
 });

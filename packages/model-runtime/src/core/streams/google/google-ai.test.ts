@@ -1,79 +1,68 @@
 import type { GenerateContentResponse } from '@google/genai';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { serializeScopedSignature, type SignatureScope } from '../../../utils/signatureScope';
 import * as uuidModule from '../../../utils/uuid';
+import { createReadableStream, readStreamChunk as decodeStreamChunks } from '../utils';
 import { GoogleGenerativeAIStream, LOBE_ERROR_KEY } from './index';
 
-/**
- * Helper function to decode stream chunks into string array
- */
-async function decodeStreamChunks(stream: ReadableStream): Promise<string[]> {
-  const decoder = new TextDecoder();
-  const chunks: string[] = [];
-
-  // @ts-ignore
-  for await (const chunk of stream) {
-    chunks.push(decoder.decode(chunk, { stream: true }));
-  }
-
-  return chunks;
-}
+const thoughtSignatureScope: SignatureScope = { fingerprint: 'a'.repeat(32) };
+const scopedThoughtSignature = (signature: string) =>
+  serializeScopedSignature(signature, thoughtSignatureScope, 'thought_signature')!;
 
 describe('GoogleGenerativeAIStream', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
   describe('Basic functionality', () => {
     it('should transform Google Generative AI stream to protocol stream', async () => {
       vi.spyOn(uuidModule, 'nanoid').mockReturnValueOnce('1').mockReturnValueOnce('abcd1234');
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          // Text chunk
-          controller.enqueue({
-            text: 'Hello',
-            candidates: [{ content: { parts: [{ text: 'Hello' }], role: 'model' }, index: 0 }],
-          } as unknown as GenerateContentResponse);
-
-          // Function call chunk
-          controller.enqueue({
-            text: '',
-            candidates: [
-              {
-                content: {
-                  parts: [
-                    {
-                      functionCall: {
-                        name: 'testFunction',
-                        args: { arg1: 'value1' },
-                      },
+      const mockGoogleStream = createReadableStream([
+        // Text chunk
+        {
+          text: 'Hello',
+          candidates: [{ content: { parts: [{ text: 'Hello' }], role: 'model' }, index: 0 }],
+        } as unknown as GenerateContentResponse,
+        // Function call chunk
+        {
+          text: '',
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: {
+                      name: 'testFunction',
+                      args: { arg1: 'value1' },
                     },
-                  ],
-                  role: 'model',
-                },
-                index: 0,
+                  },
+                ],
+                role: 'model',
               },
-            ],
-          } as unknown as GenerateContentResponse);
-
-          // Final chunk with finishReason and usageMetadata to mark terminal event
-          controller.enqueue({
-            text: ' world!',
-            candidates: [
-              {
-                content: { parts: [{ text: ' world!' }], role: 'model' },
-                finishReason: 'STOP',
-                index: 0,
-              },
-            ],
-            usageMetadata: {
-              promptTokenCount: 1,
-              totalTokenCount: 1,
-              promptTokensDetails: [{ modality: 'TEXT', tokenCount: 1 }],
+              index: 0,
             },
-            modelVersion: 'gemini-test',
-          } as unknown as GenerateContentResponse);
-
-          controller.close();
-        },
-      });
+          ],
+        } as unknown as GenerateContentResponse,
+        // Final chunk with finishReason and usageMetadata to mark terminal event
+        {
+          text: ' world!',
+          candidates: [
+            {
+              content: { parts: [{ text: ' world!' }], role: 'model' },
+              finishReason: 'STOP',
+              index: 0,
+            },
+          ],
+          usageMetadata: {
+            promptTokenCount: 1,
+            totalTokenCount: 1,
+            promptTokensDetails: [{ modality: 'TEXT', tokenCount: 1 }],
+          },
+          modelVersion: 'gemini-test',
+        } as unknown as GenerateContentResponse,
+      ]);
 
       const onStartMock = vi.fn();
       const onTextMock = vi.fn();
@@ -125,25 +114,21 @@ describe('GoogleGenerativeAIStream', () => {
 
     it('should handle empty stream', async () => {
       vi.spyOn(uuidModule, 'nanoid').mockReturnValueOnce('E5M9dFKw');
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue({
-            candidates: [{ content: { role: 'model' }, finishReason: 'STOP', index: 0 }],
-            usageMetadata: {
-              promptTokenCount: 0,
-              cachedContentTokenCount: 0,
-              totalTokenCount: 0,
-              promptTokensDetails: [
-                { modality: 'TEXT', tokenCount: 0 },
-                { modality: 'IMAGE', tokenCount: 0 },
-              ],
-            },
-            modelVersion: 'gemini-test',
-          } as unknown as GenerateContentResponse);
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream([
+        {
+          candidates: [{ content: { role: 'model' }, finishReason: 'STOP', index: 0 }],
+          usageMetadata: {
+            promptTokenCount: 0,
+            cachedContentTokenCount: 0,
+            totalTokenCount: 0,
+            promptTokensDetails: [
+              { modality: 'TEXT', tokenCount: 0 },
+              { modality: 'IMAGE', tokenCount: 0 },
+            ],
+          },
+          modelVersion: 'gemini-test',
+        } as unknown as GenerateContentResponse,
+      ]);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -161,21 +146,18 @@ describe('GoogleGenerativeAIStream', () => {
 
     it('should expose missing usage diagnostics when finishReason has no usageMetadata', async () => {
       vi.spyOn(uuidModule, 'nanoid').mockReturnValueOnce('missingUsage');
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue({
-            candidates: [
-              {
-                content: { parts: [{ text: '' }], role: 'model' },
-                finishReason: 'STOP',
-                index: 0,
-              },
-            ],
-            modelVersion: 'gemini-test',
-          } as unknown as GenerateContentResponse);
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream([
+        {
+          candidates: [
+            {
+              content: { parts: [{ text: '' }], role: 'model' },
+              finishReason: 'STOP',
+              index: 0,
+            },
+          ],
+          modelVersion: 'gemini-test',
+        } as unknown as GenerateContentResponse,
+      ]);
       const onFinal = vi.fn();
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream, {
@@ -274,15 +256,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -399,15 +373,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -494,15 +460,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -547,13 +505,7 @@ describe('GoogleGenerativeAIStream', () => {
         modelVersion: 'gemini-2.0-flash-exp',
       };
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(data);
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream([data]);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -587,13 +539,7 @@ describe('GoogleGenerativeAIStream', () => {
         modelVersion: 'gemini-2.0-flash-exp',
       };
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(data);
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream([data]);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -660,15 +606,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -722,13 +660,7 @@ describe('GoogleGenerativeAIStream', () => {
         modelVersion: 'gemini-2.0-flash-exp',
       };
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(data);
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream([data]);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -854,15 +786,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -947,12 +871,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => controller.enqueue(item));
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
       const chunks = await decodeStreamChunks(protocolStream);
@@ -1041,12 +960,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => controller.enqueue(item));
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
       const chunks = await decodeStreamChunks(protocolStream);
@@ -1116,12 +1030,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => controller.enqueue(item));
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
       const chunks = await decodeStreamChunks(protocolStream);
@@ -1169,6 +1078,7 @@ describe('GoogleGenerativeAIStream', () => {
                 parts: [
                   {
                     functionCall: {
+                      id: 'call_search_1',
                       name: 'grep____searchGitHub____mcp',
                       args: {
                         query: '"version":',
@@ -1214,16 +1124,11 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
-      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
+      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream, {
+        payload: { thoughtSignatureScope },
+      });
 
       const chunks = await decodeStreamChunks(protocolStream);
 
@@ -1231,7 +1136,7 @@ describe('GoogleGenerativeAIStream', () => {
         [
           'id: chat_1',
           'event: tool_calls',
-          'data: [{"function":{"arguments":"{\\"query\\":\\"\\\\\\"version\\\\\\":\\",\\"repo\\":\\"lobehub/lobe-chat\\",\\"path\\":\\"package.json\\"}","name":"grep____searchGitHub____mcp"},"id":"grep____searchGitHub____mcp_0_abcd1234","index":0,"thoughtSignature":"123","type":"function"}]\n',
+          `data: [{"function":{"arguments":"{\\"query\\":\\"\\\\\\"version\\\\\\":\\",\\"repo\\":\\"lobehub/lobe-chat\\",\\"path\\":\\"package.json\\"}","name":"grep____searchGitHub____mcp"},"id":"call_search_1","index":0,"thoughtSignature":"${scopedThoughtSignature('123')}","type":"function"}]\n`,
 
           'id: chat_1',
           'event: stop',
@@ -1352,16 +1257,11 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
-      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
+      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream, {
+        payload: { thoughtSignatureScope },
+      });
 
       const chunks = await decodeStreamChunks(protocolStream);
 
@@ -1369,7 +1269,7 @@ describe('GoogleGenerativeAIStream', () => {
         [
           'id: chat_1',
           'event: tool_calls',
-          'data: [{"function":{"arguments":"{\\"location\\":\\"Paris\\"}","name":"get_current_temperature"},"id":"get_current_temperature_0_abcd1234","index":0,"thoughtSignature":"ErEDCq4DAdHtim...","type":"function"}]\n',
+          `data: [{"function":{"arguments":"{\\"location\\":\\"Paris\\"}","name":"get_current_temperature"},"id":"get_current_temperature_0_abcd1234","index":0,"thoughtSignature":"${scopedThoughtSignature('ErEDCq4DAdHtim...')}","type":"function"}]\n`,
 
           'id: chat_1',
           'event: tool_calls',
@@ -1514,16 +1414,11 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
-      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
+      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream, {
+        payload: { thoughtSignatureScope },
+      });
 
       const chunks = await decodeStreamChunks(protocolStream);
 
@@ -1538,7 +1433,7 @@ describe('GoogleGenerativeAIStream', () => {
           // First tool call (createPlan)
           'id: chat_test',
           'event: tool_calls',
-          'data: [{"function":{"arguments":"{\\"goal\\":\\"Fix Linear API Argument Validation Error\\",\\"description\\":\\"Investigate the Linear API error.\\",\\"context\\":\\"The user is encountering a validation error.\\"}","name":"lobe-agent____createPlan"},"id":"lobe-agent____createPlan_0_tool_id_1","index":0,"thoughtSignature":"EoIYCv8XAXLI2nx+C18votz5l0A...","type":"function"}]\n',
+          `data: [{"function":{"arguments":"{\\"goal\\":\\"Fix Linear API Argument Validation Error\\",\\"description\\":\\"Investigate the Linear API error.\\",\\"context\\":\\"The user is encountering a validation error.\\"}","name":"lobe-agent____createPlan"},"id":"lobe-agent____createPlan_0_tool_id_1","index":0,"thoughtSignature":"${scopedThoughtSignature('EoIYCv8XAXLI2nx+C18votz5l0A...')}","type":"function"}]\n`,
 
           // Second tool call (createTodos) - should be a SEPARATE event with index:0
           'id: chat_test',
@@ -1623,15 +1518,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -1672,12 +1559,7 @@ describe('GoogleGenerativeAIStream', () => {
         responseId: 'THOUaKaNOeiGz7IPjL_VgQc',
       };
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(data);
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream([data]);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -1686,7 +1568,7 @@ describe('GoogleGenerativeAIStream', () => {
       expect(chunks).toEqual([
         'id: chat_1\n',
         'event: error\n',
-        `data: {"body":{"context":{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}},"message":"The content may contain prohibited content. Please adjust it and try again.","provider":"google"},"type":"ProviderBizError"}\n\n`,
+        `data: {"body":{"context":{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}},"message":"The content may contain prohibited content. Please adjust it and try again.","provider":"google"},"type":"ProviderContentPolicyViolation"}\n\n`,
       ]);
     });
 
@@ -1712,12 +1594,7 @@ describe('GoogleGenerativeAIStream', () => {
         modelVersion: 'gemini-3.1-flash-lite-preview',
       };
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(data);
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream([data]);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
       const chunks = await decodeStreamChunks(protocolStream);
@@ -1728,7 +1605,40 @@ describe('GoogleGenerativeAIStream', () => {
         `data: {"inputTextTokens":10,"outputImageTokens":0,"outputTextTokens":2,"totalInputTokens":10,"totalOutputTokens":2,"totalTokens":12}\n\n`,
         'id: chat_1\n',
         'event: error\n',
-        `data: {"body":{"context":{"finishMessage":"The model output could not be generated. This output contains sensitive words that violate policies.","finishReason":"PROHIBITED_CONTENT"},"message":"The content may contain prohibited content. Please adjust it and try again.","provider":"google"},"type":"ProviderBizError"}\n\n`,
+        `data: {"body":{"context":{"finishMessage":"The model output could not be generated. This output contains sensitive words that violate policies.","finishReason":"PROHIBITED_CONTENT"},"message":"The content may contain prohibited content. Please adjust it and try again.","provider":"google"},"type":"ProviderContentPolicyViolation"}\n\n`,
+      ]);
+    });
+
+    it('should classify IMAGE_PROHIBITED_CONTENT as a content policy violation', async () => {
+      vi.spyOn(uuidModule, 'nanoid').mockReturnValueOnce('1');
+
+      const mockGoogleStream = createReadableStream([
+        {
+          candidates: [
+            {
+              content: {},
+              finishReason: 'IMAGE_PROHIBITED_CONTENT',
+              index: 0,
+            },
+          ],
+          usageMetadata: {
+            candidatesTokenCount: 0,
+            promptTokenCount: 10,
+            promptTokensDetails: [{ modality: 'TEXT', tokenCount: 10 }],
+            totalTokenCount: 10,
+          },
+        },
+      ]);
+
+      const chunks = await decodeStreamChunks(GoogleGenerativeAIStream(mockGoogleStream));
+
+      expect(chunks).toEqual([
+        'id: chat_1\n',
+        'event: usage\n',
+        `data: {"inputTextTokens":10,"outputImageTokens":0,"outputTextTokens":0,"totalInputTokens":10,"totalOutputTokens":0,"totalTokens":10}\n\n`,
+        'id: chat_1\n',
+        'event: error\n',
+        `data: {"body":{"context":{"finishReason":"IMAGE_PROHIBITED_CONTENT"},"message":"The generated image was blocked due to prohibited content. Please modify your request and try again.","provider":"google"},"type":"ProviderContentPolicyViolation"}\n\n`,
       ]);
     });
 
@@ -1737,12 +1647,7 @@ describe('GoogleGenerativeAIStream', () => {
 
       const errorPayload = { message: 'internal error', code: 123 };
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          controller.enqueue({ [LOBE_ERROR_KEY]: errorPayload });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream([{ [LOBE_ERROR_KEY]: errorPayload }]);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
 
@@ -1757,7 +1662,7 @@ describe('GoogleGenerativeAIStream', () => {
   });
 
   describe('Thought filtering logic', () => {
-    it('should keep text and thoughtSignature when both exist in parts', async () => {
+    it('should scope thoughtSignature across reasoning and content parts', async () => {
       vi.spyOn(uuidModule, 'nanoid').mockReturnValueOnce('1');
 
       const data = [
@@ -1766,6 +1671,11 @@ describe('GoogleGenerativeAIStream', () => {
             {
               content: {
                 parts: [
+                  {
+                    text: 'Thinking',
+                    thought: true,
+                    thoughtSignature: 'thought-sig',
+                  },
                   {
                     text: 'Here is my answer',
                     thoughtSignature: 'sig123',
@@ -1787,23 +1697,22 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
-      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
+      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream, {
+        payload: { thoughtSignatureScope },
+      });
       const chunks = await decodeStreamChunks(protocolStream);
 
       expect(chunks).toEqual(
         [
           'id: chat_1',
+          'event: reasoning_part',
+          `data: {"content":"Thinking","inReasoning":true,"partType":"text","thoughtSignature":"${scopedThoughtSignature('thought-sig')}"}\n`,
+
+          'id: chat_1',
           'event: content_part',
-          'data: {"content":"Here is my answer","partType":"text","thoughtSignature":"sig123"}\n',
+          `data: {"content":"Here is my answer","partType":"text","thoughtSignature":"${scopedThoughtSignature('sig123')}"}\n`,
 
           'id: chat_1',
           'event: stop',
@@ -1814,6 +1723,35 @@ describe('GoogleGenerativeAIStream', () => {
           'data: {"inputTextTokens":10,"outputImageTokens":0,"outputReasoningTokens":50,"outputTextTokens":5,"totalInputTokens":10,"totalOutputTokens":55,"totalTokens":15}\n',
         ].map((i) => i + '\n'),
       );
+    });
+
+    it('should omit thoughtSignature from parts when no scope is available', async () => {
+      vi.spyOn(uuidModule, 'nanoid').mockReturnValueOnce('1');
+
+      const mockGoogleStream = createReadableStream([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'Here is my answer', thoughtSignature: 'sig123' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+              index: 0,
+            },
+          ],
+          usageMetadata: {
+            candidatesTokenCount: 4,
+            promptTokenCount: 3,
+            totalTokenCount: 7,
+          },
+        },
+      ]);
+
+      const chunks = await decodeStreamChunks(GoogleGenerativeAIStream(mockGoogleStream));
+
+      expect(chunks).toContain('data: {"content":"Here is my answer","partType":"text"}\n\n');
+      expect(chunks.join('')).not.toContain('sig123');
     });
   });
 
@@ -1996,16 +1934,11 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
-      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
+      const protocolStream = GoogleGenerativeAIStream(mockGoogleStream, {
+        payload: { thoughtSignatureScope },
+      });
       const chunks = await decodeStreamChunks(protocolStream);
 
       expect(chunks).toEqual(
@@ -2043,7 +1976,7 @@ describe('GoogleGenerativeAIStream', () => {
           // Content image (with thoughtSignature but not thought:true)
           'id: chat_1',
           'event: content_part',
-          'data: {"content":"/9j/4AAQSkZJRgABAQEBLAEsAAD/2wBDAAEBAQEBAQEBA2Q==","mimeType":"image/jpeg","partType":"image","thoughtSignature":"EueybArjsmwB0e2Kby+QPRkacnmPuV+CqMr6tiey3M5BHLHgIiggQOMeFmnKzsoux6PI6dQMgmdbXE1OTLLcWUmUD1CgFn+C2VdI09FpHrVhxVAtSk/zFVSlsjfCuANxtkP8tCDppVZqIya0QYjzg5K1fEO0m42CZX2/MHyqL8NjzR0lT8ENdoV3RSaK2tXqPH45uIb6nGeBSuX1n2EUMzO"}\n',
+          `data: {"content":"/9j/4AAQSkZJRgABAQEBLAEsAAD/2wBDAAEBAQEBAQEBA2Q==","mimeType":"image/jpeg","partType":"image","thoughtSignature":"${scopedThoughtSignature('EueybArjsmwB0e2Kby+QPRkacnmPuV+CqMr6tiey3M5BHLHgIiggQOMeFmnKzsoux6PI6dQMgmdbXE1OTLLcWUmUD1CgFn+C2VdI09FpHrVhxVAtSk/zFVSlsjfCuANxtkP8tCDppVZqIya0QYjzg5K1fEO0m42CZX2/MHyqL8NjzR0lT8ENdoV3RSaK2tXqPH45uIb6nGeBSuX1n2EUMzO')}"}\n`,
 
           // stop
           'id: chat_1',
@@ -2133,14 +2066,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
       const chunks = await decodeStreamChunks(protocolStream);
@@ -2210,14 +2136,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
       const chunks = await decodeStreamChunks(protocolStream);
@@ -2271,14 +2190,7 @@ describe('GoogleGenerativeAIStream', () => {
         },
       ];
 
-      const mockGoogleStream = new ReadableStream({
-        start(controller) {
-          data.forEach((item) => {
-            controller.enqueue(item);
-          });
-          controller.close();
-        },
-      });
+      const mockGoogleStream = createReadableStream(data);
 
       const protocolStream = GoogleGenerativeAIStream(mockGoogleStream);
       const chunks = await decodeStreamChunks(protocolStream);

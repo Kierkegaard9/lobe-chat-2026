@@ -9,10 +9,13 @@ import type {
 } from '@lobechat/electron-client-ipc';
 import { BrowserWindow, shell } from 'electron';
 
+import { isDev } from '@/const/env';
 import GatewayConnectionService from '@/services/gatewayConnectionSrv';
+import { openAuthorizationUrl } from '@/utils/authorizationUrl';
 import { appendVercelCookie } from '@/utils/http-headers';
 import { createLogger } from '@/utils/logger';
 import { netFetch } from '@/utils/net-fetch';
+import { setDesktopUserAgentHeader } from '@/utils/user-agent';
 
 import { ControllerModule, IpcMethod } from './index';
 import RemoteServerConfigCtr from './RemoteServerConfigCtr';
@@ -119,9 +122,12 @@ export default class AuthCtr extends ControllerModule {
 
       logger.info(`Constructed authorization URL: ${authUrl.toString()}`);
 
-      // Open authorization URL in the default browser
-      await shell.openExternal(authUrl.toString());
-      logger.debug('Opening authorization URL in default browser');
+      // Open the authorization URL in the default browser, or hand it to a dev launcher
+      const destination = await openAuthorizationUrl(authUrl.toString(), {
+        isDev,
+        openExternal: (url) => shell.openExternal(url),
+      });
+      logger.debug(`Authorization URL sent to the ${destination}`);
 
       this.broadcastAuthorizationProgress({
         elapsed: 0,
@@ -370,6 +376,7 @@ export default class AuthCtr extends ControllerModule {
       // Use Electron net.fetch to respect system CA store (self-signed/private CA certs)
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       appendVercelCookie(headers);
+      setDesktopUserAgentHeader(headers);
       const response = await netFetch(url.toString(), { headers, method: 'GET' });
 
       // Check response status
@@ -488,6 +495,7 @@ export default class AuthCtr extends ControllerModule {
         'Content-Type': 'application/x-www-form-urlencoded',
       };
       appendVercelCookie(tokenHeaders);
+      setDesktopUserAgentHeader(tokenHeaders);
       const response = await netFetch(tokenUrl.toString(), {
         body,
         headers: tokenHeaders,
@@ -550,13 +558,15 @@ export default class AuthCtr extends ControllerModule {
   }
 
   /**
-   * Connect to device gateway (fire-and-forget)
+   * Connect to device gateway (fire-and-forget). A sign-in may be another
+   * account or another server, so whatever the previous login had open is
+   * replaced rather than joined.
    */
   private connectGateway() {
     const gatewaySrv = this.app.getService(GatewayConnectionService);
     if (gatewaySrv) {
       logger.info('Triggering gateway connection after login');
-      gatewaySrv.connect().catch((error) => {
+      gatewaySrv.restart().catch((error) => {
         logger.error('Gateway connection after login failed:', error);
       });
     }

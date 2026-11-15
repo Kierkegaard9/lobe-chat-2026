@@ -1,7 +1,7 @@
 import { ModelProvider } from 'model-bank';
 
-import type { OpenAICompatibleFactoryOptions } from '../../core/openaiCompatibleFactory';
-import { createOpenAICompatibleRuntime } from '../../core/openaiCompatibleFactory';
+import type { OpenAICompatibleFactoryOptions } from '../../core/openaiCompatible';
+import { createOpenAICompatibleRuntime } from '../../core/openaiCompatible';
 import { createHunyuanImage } from './createImage';
 import { createHunyuanVideo } from './createVideo';
 
@@ -22,7 +22,7 @@ export const params = {
               ? reasoning.content
               : undefined;
 
-        if (message.role === 'assistant' && model === 'hy3-preview') {
+        if (message.role === 'assistant' && (model === 'hy3-preview' || model === 'hy3')) {
           return {
             ...rest,
             reasoning_content: reasoningContent ?? '',

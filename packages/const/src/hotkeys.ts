@@ -1,5 +1,7 @@
 import type { HotkeyGroupId, HotkeyId, HotkeyRegistration, HotkeyScopeId } from '@lobechat/types';
 
+import { isDesktop } from './version';
+
 const combineKeys = (keys: string[]) => keys.join('+');
 
 export const KeyEnum = {
@@ -45,17 +47,24 @@ export const HotkeyEnum = {
   DeleteAndRegenerateMessage: 'deleteAndRegenerateMessage',
   DeleteLastMessage: 'deleteLastMessage',
   EditMessage: 'editMessage',
+  FindInTopic: 'findInTopic',
   NavigateToChat: 'navigateToChat',
+  NextTab: 'nextTab',
   OpenChatSettings: 'openChatSettings',
+  PrevTab: 'prevTab',
   OpenHotkeyHelper: 'openHotkeyHelper',
+  OpenTaskFilter: 'openTaskFilter',
   RegenerateMessage: 'regenerateMessage',
   SaveDocument: 'saveDocument',
   SaveTopic: 'saveTopic',
   Search: 'search',
   ShowApp: 'showApp',
   SwitchAgent: 'switchAgent',
+  SwitchTab: 'switchTab',
+  ToggleFavorite: 'toggleFavorite',
   ToggleLeftPanel: 'toggleLeftPanel',
   ToggleRightPanel: 'toggleRightPanel',
+  ToggleTerminalPanel: 'toggleTerminalPanel',
 } as const satisfies Record<string, HotkeyId>;
 
 export const HotkeyGroupEnum = {
@@ -85,17 +94,43 @@ export const HOTKEYS_REGISTRATION: HotkeyRegistration = [
     keys: combineKeys([KeyEnum.Mod, 'j']),
     scopes: [HotkeyScopeEnum.Global],
   },
+  // Desktop's number shortcuts select titlebar tabs, not agents.
+  ...(!isDesktop
+    ? [
+        {
+          group: HotkeyGroupEnum.Essential,
+          id: HotkeyEnum.SwitchAgent,
+          keys: combineKeys([KeyEnum.Ctrl, KeyEnum.Number]),
+          nonEditable: true,
+          scopes: [HotkeyScopeEnum.Global],
+        },
+      ]
+    : []),
   {
     group: HotkeyGroupEnum.Essential,
-    id: HotkeyEnum.SwitchAgent,
+    id: HotkeyEnum.SwitchTab,
     keys: combineKeys([KeyEnum.Ctrl, KeyEnum.Number]),
     nonEditable: true,
     scopes: [HotkeyScopeEnum.Global],
   },
   {
     group: HotkeyGroupEnum.Essential,
+    id: HotkeyEnum.NextTab,
+    keys: combineKeys([KeyEnum.Ctrl, KeyEnum.Tab]),
+    nonEditable: true,
+    scopes: [HotkeyScopeEnum.Global],
+  },
+  {
+    group: HotkeyGroupEnum.Essential,
+    id: HotkeyEnum.PrevTab,
+    keys: combineKeys([KeyEnum.Ctrl, KeyEnum.Shift, KeyEnum.Tab]),
+    nonEditable: true,
+    scopes: [HotkeyScopeEnum.Global],
+  },
+  {
+    group: HotkeyGroupEnum.Essential,
     id: HotkeyEnum.NavigateToChat,
-    keys: combineKeys([KeyEnum.Ctrl, KeyEnum.Backquote]),
+    keys: combineKeys([KeyEnum.Ctrl, KeyEnum.Shift, KeyEnum.Backquote]),
     scopes: [HotkeyScopeEnum.Global],
   },
   {
@@ -116,7 +151,31 @@ export const HOTKEYS_REGISTRATION: HotkeyRegistration = [
     keys: combineKeys([KeyEnum.Ctrl, KeyEnum.Shift, KeyEnum.QuestionMark]),
     scopes: [HotkeyScopeEnum.Global],
   },
+  {
+    group: HotkeyGroupEnum.Essential,
+    id: HotkeyEnum.ToggleFavorite,
+    keys: combineKeys([KeyEnum.Alt, 'f']),
+    scopes: [HotkeyScopeEnum.Global],
+  },
+  {
+    group: HotkeyGroupEnum.Essential,
+    id: HotkeyEnum.OpenTaskFilter,
+    keys: 'f',
+    scopes: [HotkeyScopeEnum.Global],
+  },
   // Chat
+  {
+    group: HotkeyGroupEnum.Conversation,
+    id: HotkeyEnum.FindInTopic,
+    keys: combineKeys([KeyEnum.Mod, 'f']),
+    scopes: [HotkeyScopeEnum.Chat],
+  },
+  {
+    group: HotkeyGroupEnum.Conversation,
+    id: HotkeyEnum.ToggleTerminalPanel,
+    keys: combineKeys([KeyEnum.Ctrl, KeyEnum.Backquote]),
+    scopes: [HotkeyScopeEnum.Chat],
+  },
   {
     group: HotkeyGroupEnum.Conversation,
     id: HotkeyEnum.OpenChatSettings,

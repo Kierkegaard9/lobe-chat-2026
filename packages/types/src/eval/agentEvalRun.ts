@@ -6,13 +6,7 @@ import type { AgentEvalDataset } from './agentEvalDataset';
 // ============================================
 
 export type AgentEvalRunStatus =
-  | 'aborted'
-  | 'completed'
-  | 'failed'
-  | 'idle'
-  | 'pending'
-  | 'external'
-  | 'running';
+  'aborted' | 'completed' | 'failed' | 'idle' | 'pending' | 'external' | 'running';
 
 export interface AgentEvalRunTargetAgent {
   avatar?: string;
@@ -30,6 +24,10 @@ export interface AgentEvalRun {
   config?: EvalRunConfig | null;
   createdAt: Date;
   datasetId: string;
+  /** The Lobe Bench or Lab experiment this run belongs to, if any. */
+  experimentId?: string | null;
+  /** Derived from saved attempts, including legacy runs with incomplete metrics. */
+  hasUnverifiedAttempts?: boolean;
   id: string;
   metrics?: EvalRunMetrics | null;
   name?: string | null;
@@ -45,16 +43,22 @@ export interface AgentEvalRun {
  */
 export interface AgentEvalRunListItem {
   averageScore?: number;
+  benchmarkId?: string;
   completedCases?: number;
   config?: EvalRunConfig | null;
   createdAt: Date;
   datasetId: string;
   datasetName?: string;
   errorCount?: number;
+  experimentId?: string | null;
+  experimentName?: string;
   failCount?: number;
+  /** True when saved attempt evidence is incomplete or contains execution/Judge errors. */
+  hasUnverifiedAttempts?: boolean;
   id: string;
   metrics?: EvalRunMetrics | null;
   name?: string | null;
+  parentRunId?: string | null;
   passCount?: number;
   passRate?: number;
   status: AgentEvalRunStatus;

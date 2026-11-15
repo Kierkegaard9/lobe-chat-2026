@@ -1,8 +1,12 @@
+import { ENABLE_TOOL_CHANNEL_SETTINGS } from '@lobechat/business-const';
 import { SkillsIcon } from '@lobehub/ui/icons';
 import {
+  AppWindowIcon,
+  Blocks,
   Brain,
   BrainCircuit,
   ChartColumnBigIcon,
+  ChartPieIcon,
   Coins,
   CreditCard,
   Database,
@@ -14,7 +18,9 @@ import {
   Map,
   PaletteIcon,
   Sparkles,
+  TagIcon,
   UserCircle,
+  Wrench,
 } from 'lucide-react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -28,10 +34,12 @@ import {
   useServerConfigStore,
 } from '@/store/serverConfig';
 import { useUserStore } from '@/store/user';
+import { labPreferSelectors } from '@/store/user/selectors';
 import { userGeneralSettingsSelectors } from '@/store/user/slices/settings/selectors';
 
 export enum SettingsGroupKey {
   Agent = 'agent',
+  Connection = 'connection',
   General = 'general',
   Subscription = 'subscription',
   System = 'system',
@@ -53,6 +61,7 @@ export const useCategory = (): CategoryGroup[] => {
   const { hideDocs, showApiKeyManage, showProvider } = useServerConfigStore(featureFlagsSelectors);
   const enableBusinessFeatures = useServerConfigStore(serverConfigSelectors.enableBusinessFeatures);
   const isDevMode = useUserStore((s) => userGeneralSettingsSelectors.config(s).isDevMode);
+  const enableOAuthApps = useUserStore(labPreferSelectors.enableOAuthApps);
 
   return useMemo(() => {
     const navigateTo = (key: SettingsTabs) =>
@@ -77,7 +86,7 @@ export const useCategory = (): CategoryGroup[] => {
       ? [
           makeItem({ icon: Map, key: SettingsTabs.Plans, label: t('subscription:tab.plans') }),
           makeItem({
-            icon: ChartColumnBigIcon,
+            icon: ChartPieIcon,
             key: SettingsTabs.Usage,
             label: t('setting:tab.usage'),
           }),
@@ -110,21 +119,32 @@ export const useCategory = (): CategoryGroup[] => {
         label: t('setting:tab.serviceModel'),
       }),
       makeItem({ icon: SkillsIcon, key: SettingsTabs.Skill, label: t('setting:tab.skill') }),
+      makeItem({ icon: TagIcon, key: SettingsTabs.Labels, label: t('setting:tab.labels') }),
       makeItem({ icon: BrainCircuit, key: SettingsTabs.Memory, label: t('setting:tab.memory') }),
-      makeItem({ icon: KeyRound, key: SettingsTabs.Creds, label: t('setting:tab.creds') }),
-      showApiKeyManage &&
-        makeItem({ icon: KeyIcon, key: SettingsTabs.APIKey, label: t('auth:tab.apikey') }),
+      ENABLE_TOOL_CHANNEL_SETTINGS &&
+        makeItem({ icon: Wrench, key: SettingsTabs.Tools, label: t('setting:tab.tools') }),
     ].filter((item): item is CategoryItem => Boolean(item));
+
+    const connection: CategoryItem[] = [
+      makeItem({ icon: Blocks, key: SettingsTabs.Connector, label: t('setting:tab.connector') }),
+      makeItem({ icon: KeyRound, key: SettingsTabs.Creds, label: t('setting:tab.creds') }),
+    ];
 
     const system: CategoryItem[] = [
       makeItem({ icon: Database, key: SettingsTabs.Storage, label: t('setting:tab.storage') }),
-      isDevMode &&
-        makeItem({ icon: KeyIcon, key: SettingsTabs.APIKey, label: t('auth:tab.apikey') }),
       makeItem({
         icon: EllipsisIcon,
         key: SettingsTabs.Advanced,
         label: t('setting:tab.advanced'),
       }),
+      (showApiKeyManage || isDevMode) &&
+        makeItem({ icon: KeyIcon, key: SettingsTabs.APIKey, label: t('auth:tab.apikey') }),
+      enableOAuthApps &&
+        makeItem({
+          icon: AppWindowIcon,
+          key: SettingsTabs.OAuthApps,
+          label: t('auth:tab.oauthApps'),
+        }),
       !hideDocs && makeItem({ icon: Info, key: SettingsTabs.About, label: t('setting:tab.about') }),
     ].filter((item): item is CategoryItem => Boolean(item));
 
@@ -136,7 +156,17 @@ export const useCategory = (): CategoryGroup[] => {
         title: t('setting:group.subscription'),
       },
       { items: agent, key: SettingsGroupKey.Agent, title: t('setting:group.aiConfig') },
-      { items: system, key: SettingsGroupKey.System, title: t('setting:group.system') },
+      { items: connection, key: SettingsGroupKey.Connection, title: t('setting:group.connection') },
+      { items: system, key: SettingsGroupKey.System, title: t('setting:group.systemDeveloper') },
     ].filter((group) => group.items.length > 0);
-  }, [t, enableBusinessFeatures, hideDocs, showApiKeyManage, showProvider, isDevMode, navigate]);
+  }, [
+    t,
+    enableBusinessFeatures,
+    hideDocs,
+    showApiKeyManage,
+    showProvider,
+    isDevMode,
+    enableOAuthApps,
+    navigate,
+  ]);
 };

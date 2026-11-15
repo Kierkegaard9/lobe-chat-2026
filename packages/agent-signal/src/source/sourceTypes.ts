@@ -10,6 +10,7 @@ export const AGENT_SIGNAL_SOURCE_TYPES = {
   agentSelfReflectionRequested: 'agent.self_reflection.requested',
   agentUserMessage: 'agent.user.message',
   botMessageMerged: 'bot.message.merged',
+  channelMessageRouted: 'channel.message.routed',
   clientGatewayError: 'client.gateway.error',
   clientGatewayRuntimeEnd: 'client.gateway.runtime_end',
   clientGatewayStepComplete: 'client.gateway.step_complete',
@@ -31,7 +32,21 @@ export type AgentSignalSourceType = ValueOf<typeof AGENT_SIGNAL_SOURCE_TYPES>;
 export interface AgentSignalSourcePayloadMap {
   [AGENT_SIGNAL_SOURCE_TYPES.agentExecutionCompleted]: {
     agentId?: string;
+    /**
+     * Message the deferred skill synthesis should anchor to — the assistant turn
+     * that completed this run. Lets completion-stage skill synthesis seed under
+     * the assistant group instead of as a floating `parent_id=null` mainline root.
+     */
+    anchorMessageId?: string;
+    /** Assistant message id for the completed turn; used to hydrate the trajectory. */
+    assistantMessageId?: string;
     operationId: string;
+    /**
+     * Completion reason as classified by the producer. Non-terminal pauses
+     * (`waiting_for_async_tool` / `waiting_for_human`) reuse this same source, so
+     * completion-stage consumers that need a finished turn must filter on it.
+     */
+    reason?: string;
     /**
      * Opaque completion side-effect payload attached by the executor for
      * builtin background agents (e.g. self-iteration tool outcomes used for
@@ -41,6 +56,8 @@ export interface AgentSignalSourcePayloadMap {
     serializedContext?: string;
     steps: number;
     topicId?: string;
+    /** User message that initiated this turn, when known by the producer. */
+    triggerMessageId?: string;
     turnCount?: number;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.agentExecutionFailed]: {
@@ -94,6 +111,12 @@ export interface AgentSignalSourcePayloadMap {
     anchorMessageId?: string;
     documentPayload?: Record<string, unknown>;
     intents?: Array<'document' | 'memory' | 'persona' | 'prompt' | 'skill'>;
+    /**
+     * `true` when the producer knows the user message opens its conversation: it has no
+     * parent message and no thread, so there is no earlier reply it could give feedback on.
+     * `undefined` means unknown; consumers must treat it as possibly having a prior reply.
+     */
+    isConversationRoot?: boolean;
     memoryPayload?: Record<string, unknown>;
     message: string;
     /** Legacy source message identifier kept for compatibility. */
@@ -113,6 +136,14 @@ export interface AgentSignalSourcePayloadMap {
     platformThreadId?: string;
     serializedContext?: string;
     topicId?: string;
+  };
+  [AGENT_SIGNAL_SOURCE_TYPES.channelMessageRouted]: {
+    agentId?: string;
+    channelId: string;
+    memberId: string;
+    message: string;
+    messageId: string;
+    threadId?: string;
   };
   [AGENT_SIGNAL_SOURCE_TYPES.clientGatewayError]: {
     agentId?: string;
@@ -334,8 +365,7 @@ export type SourceEventAgentSelfFeedbackIntentDeclared =
 
 /** Normalized tool outcome source event. */
 export type SourceEventToolOutcome =
-  | AgentSignalSourceEvent<'tool.outcome.completed'>
-  | AgentSignalSourceEvent<'tool.outcome.failed'>;
+  AgentSignalSourceEvent<'tool.outcome.completed'> | AgentSignalSourceEvent<'tool.outcome.failed'>;
 
 /** Source types accepted by browser producers through the authenticated edge. */
 export const AGENT_SIGNAL_CLIENT_SOURCE_TYPES = [

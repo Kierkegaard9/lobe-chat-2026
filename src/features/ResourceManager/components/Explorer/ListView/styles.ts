@@ -1,4 +1,4 @@
-import { createStaticStyles, cssVar } from 'antd-style';
+import { createStaticStyles, cssVar } from '@lobehub/ui';
 
 export const styles = createStaticStyles(({ css }) => ({
   dropZone: css`
@@ -11,7 +11,7 @@ export const styles = createStaticStyles(({ css }) => ({
     outline-offset: -4px;
   `,
   header: css`
-    min-width: 800px;
+    min-width: 1040px;
     height: 40px;
     min-height: 40px;
     color: ${cssVar.colorTextDescription};
@@ -20,6 +20,20 @@ export const styles = createStaticStyles(({ css }) => ({
     height: 100%;
     padding-block: 6px;
     padding-inline: 0 24px;
+  `,
+  headerItemSortable: css`
+    cursor: pointer;
+    user-select: none;
+
+    &:hover {
+      color: ${cssVar.colorText};
+    }
+
+    &:focus-visible {
+      border-radius: ${cssVar.borderRadiusSM};
+      outline: 2px solid ${cssVar.colorPrimaryBorder};
+      outline-offset: -2px;
+    }
   `,
   scrollContainer: css`
     overflow: auto hidden;
@@ -30,7 +44,7 @@ export const styles = createStaticStyles(({ css }) => ({
     z-index: 1;
     inset-block-start: 40px;
 
-    min-width: 800px;
+    min-width: 1040px;
     padding-block: 8px;
     padding-inline: 16px;
     border-block-end: 1px solid ${cssVar.colorBorderSecondary};

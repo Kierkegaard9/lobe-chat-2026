@@ -101,8 +101,17 @@ describe('parseSystemAgent', () => {
     expect(result.topic).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
     expect(result.translation).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
     expect(result.agentMeta).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
-    expect(result.historyCompress).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
+    expect(result.expertise).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
+    expect(result.onboardingUnderstanding).toEqual({
+      provider: 'ollama',
+      model: 'deepseek-v3',
+    });
+    expect(result.onboardingTaskRecommender).toEqual({
+      provider: 'ollama',
+      model: 'deepseek-v3',
+    });
     expect(result.thread).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
+    expect(result.asr).toBeUndefined();
     expect(result.userMemoryEmbedding).toBeUndefined();
     expect(result.memoryAnalysisAgentConfig).toBeUndefined();
     expect(result.userMemoryPersonaWriter).toBeUndefined();
@@ -124,6 +133,23 @@ describe('parseSystemAgent', () => {
     });
   });
 
+  /** @example Onboarding generation tasks can select different providers and models. */
+  it('should parse onboarding task model assignments independently', () => {
+    const envValue =
+      'onboardingUnderstanding=lobehub/gpt-5.4-mini,onboardingTaskRecommender=anthropic/claude-sonnet-4-5';
+
+    const result = parseSystemAgent(envValue);
+
+    expect(result.onboardingUnderstanding).toEqual({
+      model: 'gpt-5.4-mini',
+      provider: 'lobehub',
+    });
+    expect(result.onboardingTaskRecommender).toEqual({
+      model: 'claude-sonnet-4-5',
+      provider: 'anthropic',
+    });
+  });
+
   it('should override default setting with specific settings', () => {
     const envValue = 'default=ollama/deepseek-v3,topic=openai/gpt-4';
 
@@ -133,7 +159,6 @@ describe('parseSystemAgent', () => {
 
     expect(result.translation).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
     expect(result.agentMeta).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
-    expect(result.historyCompress).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
     expect(result.thread).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
   });
 
@@ -149,7 +174,14 @@ describe('parseSystemAgent', () => {
     // 其他系统智能体应该使用默认配置
     expect(result.translation).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
     expect(result.agentMeta).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
-    expect(result.historyCompress).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
     expect(result.thread).toEqual({ provider: 'ollama', model: 'deepseek-v3' });
+  });
+
+  it('parses an explicit speech-to-text model', () => {
+    const result = parseSystemAgent(
+      'default=ollama/deepseek-v3,asr=lobehub/gpt-4o-mini-transcribe',
+    );
+
+    expect(result.asr).toEqual({ provider: 'lobehub', model: 'gpt-4o-mini-transcribe' });
   });
 });

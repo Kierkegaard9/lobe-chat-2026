@@ -2,23 +2,26 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AgentEvalRunModel, AgentEvalRunTopicModel } from '@/database/models/agentEval';
-import { topics } from '@/database/schemas';
+import { ThreadModel } from '@/database/models/thread';
+import { agentOperations, topics } from '@/database/schemas';
 import { AgentEvalRunService } from '@/server/services/agentEvalRun';
 import { AgentRuntimeService } from '@/server/services/agentRuntime/AgentRuntimeService';
 
 import { cleanupDB, serverDB, setupEvalChain, setupMultiCaseRun, userId } from './_setup';
 
 vi.mock('@/server/services/agentRuntime/AgentRuntimeService', () => ({
-  AgentRuntimeService: vi.fn().mockImplementation(() => ({
-    interruptOperation: vi.fn().mockResolvedValue(true),
-  })),
+  AgentRuntimeService: vi.fn().mockImplementation(function () {
+    return {
+      interruptOperation: vi.fn().mockResolvedValue(true),
+    };
+  }),
 }));
 
 beforeEach(cleanupDB);
 
 describe('AgentEvalRunService', () => {
   describe('retryErrorCases', () => {
-    it('should delete error/timeout RunTopics and orphan topics, set run to pending', async () => {
+    it('should delete error/timeout RunTopics but preserve old topics, set run to pending', async () => {
       const { run, cases } = await setupMultiCaseRun(
         [
           { assistantOutput: '42', expected: '42' },
@@ -78,11 +81,11 @@ describe('AgentEvalRunService', () => {
       expect(passedTopics).toHaveLength(1);
       expect(pendingTopics).toHaveLength(2);
 
-      // Old orphan topics for error/timeout cases should be deleted
+      // Old topics for error/timeout cases should be PRESERVED (audit/history)
       const [topic2] = await serverDB.select().from(topics).where(eq(topics.id, cases[1].topic.id));
       const [topic3] = await serverDB.select().from(topics).where(eq(topics.id, cases[2].topic.id));
-      expect(topic2).toBeUndefined();
-      expect(topic3).toBeUndefined();
+      expect(topic2).toBeDefined();
+      expect(topic3).toBeDefined();
 
       // New pending RunTopics should have new topic IDs (not the old ones)
       const newTopicIds = pendingTopics.map((t) => t.topicId);
@@ -122,6 +125,57 @@ describe('AgentEvalRunService', () => {
     it('should throw when run not found', async () => {
       const service = new AgentEvalRunService(serverDB, userId);
       await expect(service.retryErrorCases('non-existent-id')).rejects.toThrow('Run not found');
+    });
+  });
+
+  describe('retrySingleCase', () => {
+    it('should preserve the old topic and re-link a fresh RunTopic', async () => {
+      const { run, cases } = await setupMultiCaseRun([{ assistantOutput: '42', expected: '42' }], {
+        datasetEvalMode: 'contains',
+      });
+
+      const runTopicModel = new AgentEvalRunTopicModel(serverDB, userId);
+      const service = new AgentEvalRunService(serverDB, userId);
+
+      // Complete the case as passed
+      await service.recordTrajectoryCompletion({
+        runId: run.id,
+        telemetry: { completionReason: 'stop', duration: 1000 },
+        testCaseId: cases[0].testCase.id,
+      });
+
+      const oldTopicId = cases[0].topic.id;
+      await service.retrySingleCase(run.id, cases[0].testCase.id);
+
+      // Old topic preserved
+      const [oldTopic] = await serverDB.select().from(topics).where(eq(topics.id, oldTopicId));
+      expect(oldTopic).toBeDefined();
+
+      // Exactly one RunTopic, pointing at a new topic, back to pending
+      const runTopics = await runTopicModel.findByRunId(run.id);
+      expect(runTopics).toHaveLength(1);
+      expect(runTopics[0].topicId).not.toBe(oldTopicId);
+      expect(runTopics[0].status).toBe('pending');
+    });
+
+    it('should reject retrying an active (running) case', async () => {
+      const { run, cases } = await setupMultiCaseRun([{ assistantOutput: null }], {
+        datasetEvalMode: 'contains',
+      });
+
+      const runTopicModel = new AgentEvalRunTopicModel(serverDB, userId);
+      const service = new AgentEvalRunService(serverDB, userId);
+
+      const rt = await runTopicModel.findByRunAndTestCase(run.id, cases[0].testCase.id);
+      await runTopicModel.updateByRunAndTopic(rt!.runId, rt!.topicId, { status: 'running' });
+
+      await expect(service.retrySingleCase(run.id, cases[0].testCase.id)).rejects.toThrow(
+        'Cannot retry: case is running',
+      );
+
+      // RunTopic untouched
+      const still = await runTopicModel.findByRunAndTestCase(run.id, cases[0].testCase.id);
+      expect(still?.topicId).toBe(rt!.topicId);
     });
   });
 
@@ -219,6 +273,79 @@ describe('AgentEvalRunService', () => {
       expect(mockInstance.interruptOperation).toHaveBeenCalledTimes(2);
       expect(mockInstance.interruptOperation).toHaveBeenCalledWith('op-111');
       expect(mockInstance.interruptOperation).toHaveBeenCalledWith('op-222');
+    });
+
+    it('interrupts the sub-agent operations an attempt forked, not the finished ones', async () => {
+      const { run, cases } = await setupMultiCaseRun([{ assistantOutput: null }]);
+
+      const runModel = new AgentEvalRunModel(serverDB, userId);
+      await runModel.update(run.id, { status: 'running' });
+      const runTopicModel = new AgentEvalRunTopicModel(serverDB, userId);
+      const rt = await runTopicModel.findByRunAndTestCase(run.id, cases[0].testCase.id);
+      await runTopicModel.updateByRunAndTopic(rt!.runId, rt!.topicId, {
+        evalResult: { operationId: 'op-parent', rubricScores: [] },
+        status: 'running',
+      });
+      // The attempt parked on a `callSubAgent` child; one child still runs,
+      // one already finished, and a stranger's child must stay untouched.
+      await serverDB.insert(agentOperations).values([
+        { id: 'op-parent', status: 'waiting_for_async_tool', userId },
+        { id: 'op-child-live', parentOperationId: 'op-parent', status: 'running', userId },
+        { id: 'op-child-done', parentOperationId: 'op-parent', status: 'done', userId },
+        { id: 'op-other', parentOperationId: 'op-elsewhere', status: 'running', userId },
+      ]);
+
+      vi.mocked(AgentRuntimeService).mockClear();
+
+      const service = new AgentEvalRunService(serverDB, userId);
+      await service.abortRun(run.id);
+
+      const mockInstance = vi.mocked(AgentRuntimeService).mock.results[0].value;
+      expect(mockInstance.interruptOperation).toHaveBeenCalledTimes(2);
+      expect(mockInstance.interruptOperation).toHaveBeenCalledWith('op-parent');
+      expect(mockInstance.interruptOperation).toHaveBeenCalledWith('op-child-live');
+    });
+
+    it('marks Stop before callbacks and interrupts every attempt root and open child', async () => {
+      const { run, cases } = await setupMultiCaseRun([{ assistantOutput: null }]);
+      const model = new AgentEvalRunTopicModel(serverDB, userId);
+      const topicId = cases[0].topic.id;
+      await model.updateByRunAndTopic(run.id, topicId, { status: 'running' });
+      const threadModel = new ThreadModel(serverDB, userId);
+      for (const id of ['one', 'two', 'three']) {
+        const thread = await threadModel.create({ topicId, type: 'eval' });
+        await threadModel.update(thread!.id, { metadata: { operationId: id } });
+        await serverDB.insert(agentOperations).values([
+          { id, status: 'running', userId },
+          { id: `${id}-child`, parentOperationId: id, status: 'waiting_for_async_tool', userId },
+          { id: `${id}-done`, parentOperationId: id, status: 'done', userId },
+        ]);
+      }
+      const observed: string[] = [];
+      vi.mocked(AgentRuntimeService).mockImplementationOnce(function () {
+        return {
+          interruptOperation: async (id: string) => {
+            const current = await model.findByRunAndTestCase(run.id, cases[0].testCase.id);
+            expect(current?.evalResult?.completionReason).toBe('aborted');
+            // A callback that races with interrupt is rejected by the DB predicate.
+            const late = await model.updateByRunAndTopic(run.id, topicId, {
+              status: 'passed',
+              passed: true,
+            });
+            expect(late).toBeUndefined();
+            observed.push(id);
+          },
+        } as any;
+      });
+      await new AgentEvalRunService(serverDB, userId).abortRun(run.id);
+      expect(observed.sort()).toEqual([
+        'one',
+        'one-child',
+        'three',
+        'three-child',
+        'two',
+        'two-child',
+      ]);
     });
 
     it('should skip interrupt for topics without operationId', async () => {

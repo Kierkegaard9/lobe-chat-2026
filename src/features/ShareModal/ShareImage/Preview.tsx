@@ -1,10 +1,11 @@
-import { type ConversationContext, type UIChatMessage } from '@lobechat/types';
-import { ModelTag } from '@lobehub/icons';
-import { Avatar, Flexbox, Markdown, Text } from '@lobehub/ui';
-import { cx } from 'antd-style';
+import { DEFAULT_INBOX_TITLE } from '@lobechat/const';
+import { agentDisplayName, type ConversationContext, type UIChatMessage } from '@lobechat/types';
+import { cx, Flexbox, Markdown, Text } from '@lobehub/ui';
 import { memo } from 'react';
 
+import AgentAvatar from '@/components/AgentAvatar';
 import { ProductLogo } from '@/components/Branding';
+import { ModelTag } from '@/components/LobeIcons';
 import PluginTag from '@/features/PluginTag';
 import { filterToolIds } from '@/helpers/toolFilters';
 import { useAgentStore } from '@/store/agent';
@@ -13,6 +14,7 @@ import { agentByIdSelectors, agentSelectors, builtinAgentSelectors } from '@/sto
 import pkg from '../../../../package.json';
 import { containerStyles } from '../style';
 import ChatList from './ChatList';
+import { resolveHeaderAvatar } from './resolveHeaderAvatar';
 import { styles } from './style';
 import { type FieldType } from './type';
 import { WidthMode } from './type';
@@ -39,6 +41,7 @@ const Preview = memo<PreviewProps>(
     widthMode,
   }) => {
     const [
+      activeAgentId,
       currentModel,
       currentPlugins,
       systemRole,
@@ -55,11 +58,12 @@ const Preview = memo<PreviewProps>(
         headerAgentId && s.agentMap[headerAgentId] ? headerAgentId : undefined;
 
       return [
+        s.activeAgentId,
         agentSelectors.currentAgentModel(s),
         agentSelectors.displayableAgentPlugins(s),
         agentSelectors.currentAgentSystemRole(s),
         builtinAgentSelectors.isInboxAgent(s),
-        agentSelectors.currentAgentTitle(s),
+        agentSelectors.currentAgentDisplayName(s),
         agentSelectors.currentAgentAvatar(s),
         agentSelectors.currentAgentBackgroundColor(s),
         resolvedHeaderAgentId
@@ -78,8 +82,11 @@ const Preview = memo<PreviewProps>(
     });
 
     const displayTitle =
-      (isHeaderInbox ?? isInbox) ? 'Lobe AI' : headerMeta?.title || title || currentTitle;
-    const displayAvatar = headerMeta?.avatar || currentAvatar;
+      (isHeaderInbox ?? isInbox)
+        ? DEFAULT_INBOX_TITLE
+        : agentDisplayName(headerMeta) || title || currentTitle;
+    const resolvedAgentId = (headerMeta && headerAgentId) || activeAgentId;
+    const displayAvatar = resolveHeaderAvatar(headerMeta, currentAvatar);
     const displayBackgroundColor = headerMeta?.backgroundColor || currentBackgroundColor;
     const displayModel = headerModel || currentModel;
     const displayPlugins = headerPlugins || currentPlugins;
@@ -100,10 +107,11 @@ const Preview = memo<PreviewProps>(
           >
             <div className={styles.header}>
               <Flexbox horizontal align={'center'} gap={12}>
-                <Avatar
+                <AgentAvatar
+                  agentId={resolvedAgentId}
                   avatar={displayAvatar}
                   background={displayBackgroundColor}
-                  shape={'square'}
+                  name={displayTitle}
                   size={28}
                   title={displayTitle ?? undefined}
                 />

@@ -14,6 +14,30 @@ const mockBuiltinSkill = {
   source: 'builtin' as const,
 };
 
+const hiddenToolsState = () => ({
+  ...initialState,
+  builtinTools: [
+    {
+      hidden: true,
+      identifier: 'lobe-task',
+      manifest: {
+        api: [],
+        identifier: 'lobe-task',
+        meta: { title: 'Task Tools' },
+        systemRole: '',
+      },
+      type: 'builtin',
+    },
+    {
+      hidden: true,
+      identifier: 'tool-1',
+      manifest: { api: [], identifier: 'tool-1', meta: { title: 'Tool 1' }, systemRole: '' },
+      type: 'builtin',
+    },
+  ],
+  uninstalledBuiltinTools: [],
+});
+
 describe('builtinToolSelectors', () => {
   describe('metaList', () => {
     it('should return meta list with builtin tools and skills', () => {
@@ -79,29 +103,7 @@ describe('builtinToolSelectors', () => {
 
   describe('metaListIncludingHidden', () => {
     it('should surface hidden tools so users can toggle them', () => {
-      const state = {
-        ...initialState,
-        builtinTools: [
-          {
-            hidden: true,
-            identifier: 'lobe-task',
-            manifest: {
-              api: [],
-              identifier: 'lobe-task',
-              meta: { title: 'Task Tools' },
-              systemRole: '',
-            },
-            type: 'builtin',
-          },
-          {
-            hidden: true,
-            identifier: 'tool-1',
-            manifest: { api: [], identifier: 'tool-1', meta: { title: 'Tool 1' }, systemRole: '' },
-            type: 'builtin',
-          },
-        ],
-        uninstalledBuiltinTools: [],
-      } as ToolStoreState;
+      const state = hiddenToolsState() as ToolStoreState;
 
       const result = builtinToolSelectors.metaListIncludingHidden(state);
 
@@ -153,6 +155,7 @@ describe('builtinToolSelectors', () => {
 
       // Only fixed-display ids are returned; lobe-agent leads the list, unrelated tools excluded.
       expect(result.map((item) => item.identifier)).toContain('lobe-agent');
+      expect(result.map((item) => item.identifier)).not.toContain('lobe-activator');
       expect(result.map((item) => item.identifier)).not.toContain('tool-1');
       expect(result[0].identifier).toBe('lobe-agent');
     });
@@ -180,33 +183,116 @@ describe('builtinToolSelectors', () => {
 
   describe('installedAllMetaList', () => {
     it('should include all non-uninstalled tools in agent profile configuration', () => {
+      const state = hiddenToolsState() as ToolStoreState;
+
+      const result = builtinToolSelectors.installedAllMetaList(state);
+
+      expect(result.map((item) => item.identifier)).toEqual(['lobe-task', 'tool-1']);
+    });
+  });
+
+  describe('installedProfileConfigurableMetaList', () => {
+    it('should expose only builtin tools whose lifecycle is controlled by Agent Profile', () => {
       const state = {
         ...initialState,
         builtinTools: [
           {
             hidden: true,
-            identifier: 'lobe-task',
+            identifier: 'lobe-web-browsing',
             manifest: {
               api: [],
-              identifier: 'lobe-task',
-              meta: { title: 'Task Tools' },
+              identifier: 'lobe-web-browsing',
+              meta: { title: 'Web Browsing' },
+              systemRole: '',
+            },
+            type: 'builtin',
+          },
+          {
+            discoverable: false,
+            hidden: true,
+            identifier: 'lobe-verify',
+            manifest: {
+              api: [],
+              identifier: 'lobe-verify',
+              meta: { title: 'Verifier' },
               systemRole: '',
             },
             type: 'builtin',
           },
           {
             hidden: true,
-            identifier: 'tool-1',
-            manifest: { api: [], identifier: 'tool-1', meta: { title: 'Tool 1' }, systemRole: '' },
+            identifier: 'lobe-skill-store',
+            manifest: {
+              api: [],
+              identifier: 'lobe-skill-store',
+              meta: { title: 'Skill Store' },
+              systemRole: '',
+            },
+            type: 'builtin',
+          },
+          {
+            hidden: true,
+            identifier: 'lobe-agent-management',
+            manifest: {
+              api: [],
+              identifier: 'lobe-agent-management',
+              meta: { title: 'Agent Management' },
+              systemRole: '',
+            },
+            type: 'builtin',
+          },
+          {
+            identifier: 'profile-tool',
+            manifest: {
+              api: [],
+              identifier: 'profile-tool',
+              meta: { title: 'Profile Tool' },
+              systemRole: '',
+            },
+            type: 'builtin',
+          },
+          {
+            identifier: 'uninstalled-tool',
+            manifest: {
+              api: [],
+              identifier: 'uninstalled-tool',
+              meta: { title: 'Uninstalled Tool' },
+              systemRole: '',
+            },
             type: 'builtin',
           },
         ],
-        uninstalledBuiltinTools: [],
+        uninstalledBuiltinTools: ['uninstalled-tool'],
       } as ToolStoreState;
 
-      const result = builtinToolSelectors.installedAllMetaList(state);
+      const autoVisible = builtinToolSelectors.installedProfileConfigurableMetaList({
+        isManualMode: false,
+      })(state);
+      const autoExcluded = builtinToolSelectors.nonProfileConfigurableBuiltinToolIds({
+        isManualMode: false,
+      })(state);
+      const manualVisible = builtinToolSelectors.installedProfileConfigurableMetaList({
+        isManualMode: true,
+      })(state);
+      const manualExcluded = builtinToolSelectors.nonProfileConfigurableBuiltinToolIds({
+        isManualMode: true,
+      })(state);
 
-      expect(result.map((item) => item.identifier)).toEqual(['lobe-task', 'tool-1']);
+      expect(autoVisible.map((item) => item.identifier)).toEqual([
+        'lobe-agent-management',
+        'profile-tool',
+      ]);
+      expect(autoExcluded).toEqual(
+        expect.arrayContaining(['lobe-web-browsing', 'lobe-verify', 'lobe-skill-store']),
+      );
+      expect(manualVisible.map((item) => item.identifier)).toEqual([
+        'lobe-skill-store',
+        'lobe-agent-management',
+        'profile-tool',
+      ]);
+      expect(manualExcluded).toEqual(expect.arrayContaining(['lobe-web-browsing', 'lobe-verify']));
+      expect(manualExcluded).not.toContain('lobe-skill-store');
+      expect(manualExcluded).not.toContain('lobe-agent-management');
     });
   });
 });

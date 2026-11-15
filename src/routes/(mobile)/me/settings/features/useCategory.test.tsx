@@ -1,4 +1,4 @@
-import { renderHook } from '@testing-library/react';
+import { cleanup, renderHook } from '@testing-library/react';
 import { type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,7 +7,7 @@ import { SettingsTabs } from '@/store/global/initialState';
 import { initServerConfigStore, Provider } from '@/store/serverConfig/store';
 import { useUserStore } from '@/store/user';
 
-import { useCategory } from './useCategory';
+import { SettingsGroupKey, useCategory } from './useCategory';
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, 'localStorage', {
@@ -24,12 +24,6 @@ const navigate = vi.fn();
 
 vi.mock('react-router', () => ({
   useNavigate: () => navigate,
-}));
-
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key,
-  }),
 }));
 
 const createWrapper = (showProvider: boolean) => {
@@ -56,6 +50,7 @@ const createWrapper = (showProvider: boolean) => {
 const initialUserStoreState = useUserStore.getState();
 
 afterEach(() => {
+  cleanup();
   navigate.mockReset();
   useUserStore.setState(initialUserStoreState, true);
 });
@@ -70,7 +65,10 @@ describe('mobile settings useCategory', () => {
       .flatMap((group) => group.items)
       .find((item) => item.key === SettingsTabs.Provider);
 
+    const keys = result.current.flatMap((group) => group.items.map((item) => item.key));
+
     expect(provider).toBeDefined();
+    expect(keys).not.toContain(SettingsTabs.OAuthApps);
 
     provider?.onClick?.();
 
@@ -85,5 +83,22 @@ describe('mobile settings useCategory', () => {
     const keys = result.current.flatMap((group) => group.items.map((item) => item.key));
 
     expect(keys).not.toContain(SettingsTabs.Provider);
+  });
+
+  it('shows OAuth Apps when the Labs preference is enabled', () => {
+    useUserStore.setState({
+      preference: {
+        ...initialUserStoreState.preference,
+        lab: { ...initialUserStoreState.preference.lab, enableOAuthApps: true },
+      },
+    });
+
+    const { result } = renderHook(() => useCategory(), {
+      wrapper: createWrapper(true),
+    });
+
+    const systemGroup = result.current.find((group) => group.key === SettingsGroupKey.System);
+
+    expect(systemGroup?.items.map((item) => item.key)).toContain(SettingsTabs.OAuthApps);
   });
 });

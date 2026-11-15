@@ -46,6 +46,25 @@ const groupMembers =
     return agents.filter((agent) => !agent.isSupervisor);
   };
 
+const groupMemberAvatars =
+  (groupId: string) =>
+  (s: ChatGroupStore): { avatar?: string; background?: string; seed: string }[] =>
+    groupMembers(groupId)(s).map((agent) => ({
+      avatar: agent.avatar || undefined,
+      background: agent.backgroundColor || undefined,
+      seed: agent.id,
+    }));
+
+const groupOpeningMessage =
+  (groupId: string) =>
+  (s: ChatGroupStore): string | undefined =>
+    groupConfig(groupId)(s)?.openingMessage;
+
+const groupOpeningQuestions =
+  (groupId: string) =>
+  (s: ChatGroupStore): string[] =>
+    groupConfig(groupId)(s)?.openingQuestions || [];
+
 const groupAgentCount =
   (groupId: string) =>
   (s: ChatGroupStore): number =>
@@ -73,6 +92,15 @@ const groupBySupervisorAgentId =
     return Object.values(s.groupMap).find((group) => group.supervisorAgentId === supervisorAgentId);
   };
 
+/**
+ * The group detail fetch settled on nothing — the group doesn't exist or the
+ * viewer lost access (e.g. it was switched back to private by its owner).
+ */
+const isGroupNotFoundById =
+  (groupId: string) =>
+  (s: ChatGroupState): boolean =>
+    !!groupId && !!s.groupNotFoundMap[groupId];
+
 export const agentGroupByIdSelectors = {
   agentByIdFromGroup,
   groupAgentCount,
@@ -80,7 +108,11 @@ export const agentGroupByIdSelectors = {
   groupById,
   groupBySupervisorAgentId,
   groupConfig,
+  groupMemberAvatars,
   groupMemberCount,
   groupMembers,
   groupMeta,
+  groupOpeningMessage,
+  groupOpeningQuestions,
+  isGroupNotFoundById,
 };

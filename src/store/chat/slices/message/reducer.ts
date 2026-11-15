@@ -7,7 +7,7 @@ import {
 } from '@lobechat/types';
 import isEqual from 'fast-deep-equal';
 import i18n from 'i18next';
-import { produce } from 'immer';
+import { current, isDraft, produce } from 'immer';
 
 import { merge } from '@/utils/merge';
 
@@ -23,6 +23,8 @@ interface UpdateMessage {
 }
 
 interface CreateMessage {
+  /** Creation time to keep, e.g. the server's; defaults to the client clock. */
+  createdAt?: number;
   id: string;
   type: 'createMessage';
   value: CreateMessageParams;
@@ -43,6 +45,13 @@ interface UpdatePluginState {
   key: string;
   type: 'updatePluginState';
   value: any;
+}
+
+interface ReplaceMessagePluginState {
+  id: string;
+  metadata?: Partial<NonNullable<UIChatMessage['metadata']>>;
+  type: 'replaceMessagePluginState';
+  value: UIChatMessage['pluginState'];
 }
 
 interface UpdateMessagePlugin {
@@ -87,6 +96,7 @@ export type MessageDispatch =
   | UpdateMessage
   | UpdateMessages
   | UpdatePluginState
+  | ReplaceMessagePluginState
   | UpdateMessageExtra
   | UpdateMessageMetadata
   | DeleteMessage
@@ -95,6 +105,13 @@ export type MessageDispatch =
   | AddMessageTool
   | DeleteMessageTool
   | DeleteMessages;
+
+const getComparablePluginState = (pluginState: UIChatMessage['pluginState']) => {
+  if (!pluginState) return pluginState;
+
+  // Comparing an Immer draft directly can treat { existing: true } -> { existing: true } as changed.
+  return isDraft(pluginState) ? current(pluginState) : pluginState;
+};
 
 export const messagesReducer = (
   state: UIChatMessage[],
@@ -109,6 +126,18 @@ export const messagesReducer = (
         if (index >= 0) {
           draftState[index] = merge(draftState[index], { ...value, updatedAt: Date.now() });
         }
+      });
+    }
+
+    case 'replaceMessagePluginState': {
+      return produce(state, (draftState) => {
+        const { id, metadata, value } = payload;
+        const message = draftState.find((item) => item.id === id);
+        if (!message || message.role !== 'tool') return;
+
+        message.pluginState = value;
+        if (metadata) message.metadata = merge(message.metadata, metadata);
+        message.updatedAt = Date.now();
       });
     }
 
@@ -145,14 +174,15 @@ export const messagesReducer = (
         const message = draftState.find((i) => i.id === id);
         if (!message) return;
 
+        const pluginState = getComparablePluginState(message.pluginState);
         let newState;
-        if (!message.pluginState) {
+        if (!pluginState) {
           newState = { [key]: value } as any;
         } else {
-          newState = merge(message.pluginState, { [key]: value });
+          newState = merge(pluginState, { [key]: value });
         }
 
-        if (isEqual(message.pluginState, newState)) return;
+        if (isEqual(pluginState, newState)) return;
 
         message.pluginState = newState;
         message.updatedAt = Date.now();
@@ -166,6 +196,7 @@ export const messagesReducer = (
         if (!message || message.role !== 'tool') return;
 
         message.plugin = merge(message.plugin, value);
+        if (value.error !== undefined) message.pluginError = value.error;
         message.updatedAt = Date.now();
       });
     }
@@ -219,8 +250,9 @@ export const messagesReducer = (
     case 'createMessage': {
       return produce(state, (draftState) => {
         const { value, id } = payload;
+        const now = Date.now();
 
-        draftState.push({ ...value, createdAt: Date.now(), id, updatedAt: Date.now() });
+        draftState.push({ ...value, createdAt: payload.createdAt ?? now, id, updatedAt: now });
       });
     }
 

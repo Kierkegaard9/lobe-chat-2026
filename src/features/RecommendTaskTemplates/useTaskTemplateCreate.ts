@@ -1,8 +1,10 @@
 import type { TaskTemplate } from '@lobechat/const';
-import { App } from 'antd';
+import { snapScheduleToStandardMinute } from '@lobechat/utils/cronEval';
+import { toast } from '@lobehub/ui';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useBusinessPreciseSchedule } from '@/business/client/hooks/useBusinessPreciseSchedule';
 import { taskDetailPath } from '@/features/AgentTasks/shared/taskDetailPath';
 import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
 import { usePermission } from '@/hooks/usePermission';
@@ -35,8 +37,7 @@ export interface UseTaskTemplateCreateResult {
 }
 
 type ConnectErrorMessageKey =
-  | 'taskTemplate.action.connect.error'
-  | 'taskTemplate.action.connect.popupBlocked';
+  'taskTemplate.action.connect.error' | 'taskTemplate.action.connect.popupBlocked';
 
 export const resolveTaskTemplateConnectErrorMessageKey = (
   error: unknown,
@@ -54,8 +55,9 @@ export const useTaskTemplateCreate = ({
   title,
 }: UseTaskTemplateCreateOptions): UseTaskTemplateCreateResult => {
   const { t } = useTranslation('common');
-  const { message } = App.useApp();
+
   const { allowed: canCreateTask } = usePermission('create_content');
+  const { allowed: canUsePreciseSchedule } = useBusinessPreciseSchedule();
   const [loading, setLoading] = useState(false);
   const [created, setCreated] = useState(false);
   const inboxAgentId = useAgentStore(builtinAgentSelectors.inboxAgentId);
@@ -78,7 +80,10 @@ export const useTaskTemplateCreate = ({
         description,
         instruction: template.instruction,
         name: title,
-        schedulePattern: template.cronPattern,
+        // A template must stay usable on any plan, so a time the plan cannot pick moves to the nearest half hour.
+        schedulePattern: canUsePreciseSchedule
+          ? template.cronPattern
+          : snapScheduleToStandardMinute(template.cronPattern),
         scheduleTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       });
       await taskTemplateService.recordCreated(template.id).catch((recordError) => {
@@ -88,20 +93,24 @@ export const useTaskTemplateCreate = ({
       onCreated(template.id);
       if (createdTask?.identifier) {
         navigate(
-          taskDetailPath(createdTask.identifier, createdTask.assigneeAgentId ?? inboxAgentId),
+          taskDetailPath(
+            createdTask.identifier,
+            createdTask.assigneeAgentId ?? inboxAgentId,
+            createdTask.name,
+          ),
         );
       }
     } catch (error) {
       console.error('[taskTemplate:create]', error);
-      message.error(t('taskTemplate.action.create.error'));
+      toast.error(t('taskTemplate.action.create.error'));
     } finally {
       setLoading(false);
     }
   }, [
+    canUsePreciseSchedule,
     createTask,
     description,
     inboxAgentId,
-    message,
     navigate,
     onCreated,
     t,
@@ -116,9 +125,9 @@ export const useTaskTemplateCreate = ({
     (error: unknown) => {
       const messageKey = resolveTaskTemplateConnectErrorMessageKey(error);
       if (!messageKey) return;
-      message.error(t(messageKey));
+      toast.error(t(messageKey));
     },
-    [message, t],
+    [t],
   );
 
   // Drive the "click Add task -> chain OAuth popups -> create task" flow via a

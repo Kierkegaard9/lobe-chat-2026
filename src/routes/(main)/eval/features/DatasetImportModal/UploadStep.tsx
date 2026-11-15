@@ -1,9 +1,7 @@
 'use client';
 
 import { type FileUploadState } from '@lobechat/types';
-import { Center, Flexbox, Icon, Tag } from '@lobehub/ui';
-import { Divider, Progress, Upload } from 'antd';
-import { createStaticStyles } from 'antd-style';
+import { Center, createStaticStyles, Flexbox, Icon, Progress, Tag, Upload } from '@lobehub/ui';
 import { CloudUpload, ImportIcon } from 'lucide-react';
 import { memo, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -11,64 +9,82 @@ import { useTranslation } from 'react-i18next';
 import { type DatasetPreset } from '../../config/datasetPresets';
 import { ROLE_COLORS } from './const';
 
-const { Dragger } = Upload;
-
 const styles = createStaticStyles(({ css, cssVar }) => ({
+  // Preset summary panel — a single tonal card describing the chosen format.
   container: css`
     overflow: hidden;
-    border: 1px solid ${cssVar.colorFillTertiary};
+
+    padding: 16px;
+    border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: ${cssVar.borderRadiusLG};
+
+    background: ${cssVar.colorFillQuaternary};
   `,
-  divider: css`
-    margin: 0;
+  // Bold dropzone — the single primary action of this step.
+  dragger: css`
+    border-radius: ${cssVar.borderRadiusLG};
+    transition: border-color 0.15s ease;
+
+    @media (prefers-reduced-motion: reduce) {
+      transition: none;
+    }
   `,
   draggerContent: css`
-    min-height: 140px;
+    min-height: 160px;
   `,
   fieldsWrapper: css`
     flex-wrap: wrap;
   `,
   formatDescription: css`
-    font-size: 12px;
-    color: ${cssVar.colorTextDescription};
+    font-family: ${cssVar.fontFamilyCode};
+    font-size: ${cssVar.fontSizeSM};
+    color: ${cssVar.colorTextTertiary};
   `,
   hintText: css`
     margin: 0;
-    font-size: 12px;
+    font-size: ${cssVar.fontSizeSM};
     color: ${cssVar.colorTextTertiary};
   `,
   icon: css`
     color: ${cssVar.colorPrimary};
   `,
   iconCenter: css`
-    border: 1px solid ${cssVar.colorFillTertiary};
+    border: 1px solid ${cssVar.colorBorderSecondary};
     border-radius: ${cssVar.borderRadius};
     background: ${cssVar.colorBgElevated};
   `,
   presetDescription: css`
-    font-size: 12px;
+    font-size: ${cssVar.fontSizeSM};
     color: ${cssVar.colorTextSecondary};
   `,
   presetName: css`
-    font-size: 14px;
-    font-weight: 500;
+    font-size: ${cssVar.fontSizeLG};
+    font-weight: 600;
+    color: ${cssVar.colorText};
   `,
   progressWrapper: css`
     width: 100%;
     max-width: 320px;
   `,
   roleLabel: css`
-    font-size: 10px;
+    font-size: ${cssVar.fontSizeSM};
+  `,
+  // Section label above the field-role legend.
+  sectionLabel: css`
+    font-size: ${cssVar.fontSizeSM};
+    font-weight: 500;
+    color: ${cssVar.colorTextSecondary};
   `,
   uploadText: css`
     margin: 0;
-    font-size: 14px;
+    font-size: ${cssVar.fontSizeLG};
     font-weight: 500;
     color: ${cssVar.colorText};
   `,
 }));
 
 interface UploadStepProps {
+  archiveOnly?: boolean;
   loading: boolean;
   onFileSelect: (file: File) => void;
   preset?: DatasetPreset;
@@ -92,117 +108,126 @@ const getFieldRole = (
   }
 };
 
-const UploadStep = memo<UploadStepProps>(({ onFileSelect, loading, preset, uploadProgress }) => {
-  const { t } = useTranslation('eval');
+const UploadStep = memo<UploadStepProps>(
+  ({ archiveOnly, onFileSelect, loading, preset, uploadProgress }) => {
+    const { t } = useTranslation('eval');
 
-  const fields = useMemo(() => {
-    if (!preset) return [];
+    const fields = useMemo(() => {
+      if (!preset) return [];
 
-    const required = preset.requiredFields.map((name) => ({
-      name,
-      required: true,
-      role: getFieldRole(name, preset.fieldInference),
-    }));
+      const required = preset.requiredFields.map((name) => ({
+        name,
+        required: true,
+        role: getFieldRole(name, preset.fieldInference),
+      }));
 
-    const optional = preset.optionalFields.map((name) => ({
-      name,
-      required: false,
-      role: getFieldRole(name, preset.fieldInference),
-    }));
+      const optional = preset.optionalFields.map((name) => ({
+        name,
+        required: false,
+        role: getFieldRole(name, preset.fieldInference),
+      }));
 
-    return [...required, ...optional];
-  }, [preset]);
+      return [...required, ...optional];
+    }, [preset]);
 
-  return (
-    <Flexbox gap={16}>
-      {preset && (
-        <div className={styles.container}>
-          {/* Header */}
-          <Flexbox horizontal align="center" gap={8} paddingBlock={12} paddingInline={16}>
-            <Center className={styles.iconCenter} flex="none" height={36} width={36}>
-              <Icon icon={preset.icon} />
-            </Center>
-            <Flexbox flex={1}>
-              <div className={styles.presetName}>{preset.name}</div>
-              <div className={styles.presetDescription}>{preset.description}</div>
+    return (
+      <Flexbox gap={16}>
+        {preset && (
+          <Flexbox className={styles.container} gap={16}>
+            {/* Identity */}
+            <Flexbox horizontal align="center" gap={12}>
+              <Center className={styles.iconCenter} flex="none" height={40} width={40}>
+                <Icon icon={preset.icon} size={20} />
+              </Center>
+              <Flexbox flex={1} gap={2} style={{ minWidth: 0 }}>
+                <div className={styles.presetName}>{preset.name}</div>
+                <div className={styles.presetDescription}>{preset.description}</div>
+              </Flexbox>
             </Flexbox>
-          </Flexbox>
 
-          <Divider className={styles.divider} />
-
-          {/* Body */}
-          <Flexbox gap={12} paddingBlock={12} paddingInline={16}>
             {preset.formatDescription && (
               <div className={styles.formatDescription}>{preset.formatDescription}</div>
             )}
 
-            {/* Fields */}
-            <Flexbox horizontal className={styles.fieldsWrapper} gap={8}>
-              {fields.map((field) => {
-                const color = field.role ? ROLE_COLORS[field.role] : undefined;
-                return (
-                  <Flexbox align="center" gap={2} key={field.name}>
-                    <Tag
-                      style={
-                        color
-                          ? {
-                              background: `color-mix(in srgb, ${color} 15%, transparent)`,
-                              borderColor: 'transparent',
-                              color,
-                            }
-                          : undefined
-                      }
-                    >
-                      {field.name}
-                      {field.required && ' *'}
-                    </Tag>
-                    {field.role && (
-                      <div className={styles.roleLabel} style={{ color: color || undefined }}>
-                        {field.role}
-                      </div>
-                    )}
-                  </Flexbox>
-                );
-              })}
-            </Flexbox>
-          </Flexbox>
-        </div>
-      )}
-
-      <Dragger
-        accept=".csv,.xlsx,.xls,.json,.jsonl"
-        disabled={loading}
-        maxCount={1}
-        showUploadList={false}
-        beforeUpload={(file) => {
-          onFileSelect(file);
-          return false;
-        }}
-      >
-        {loading ? (
-          <Center className={styles.draggerContent} gap={12}>
-            <Icon
-              className={styles.icon}
-              icon={CloudUpload}
-              size={{ size: 40, strokeWidth: 1.5 }}
-            />
-            <p className={styles.uploadText}>{t('dataset.import.uploading')}</p>
-            {uploadProgress && (
-              <div className={styles.progressWrapper}>
-                <Progress percent={uploadProgress.progress} size="small" />
-              </div>
+            {/* Field-role legend */}
+            {fields.length > 0 && (
+              <Flexbox gap={8}>
+                <span className={styles.sectionLabel}>{t('dataset.import.fieldMapping')}</span>
+                <Flexbox horizontal className={styles.fieldsWrapper} gap={8}>
+                  {fields.map((field) => {
+                    const color = field.role ? ROLE_COLORS[field.role] : undefined;
+                    return (
+                      <Flexbox align="center" gap={2} key={field.name}>
+                        <Tag
+                          style={
+                            color
+                              ? {
+                                  background: `color-mix(in srgb, ${color} 15%, transparent)`,
+                                  borderColor: 'transparent',
+                                  color,
+                                }
+                              : undefined
+                          }
+                        >
+                          {field.name}
+                          {field.required && ' *'}
+                        </Tag>
+                        {field.role && (
+                          <div className={styles.roleLabel} style={{ color: color || undefined }}>
+                            {field.role}
+                          </div>
+                        )}
+                      </Flexbox>
+                    );
+                  })}
+                </Flexbox>
+              </Flexbox>
             )}
-          </Center>
-        ) : (
-          <Center className={styles.draggerContent} gap={12}>
-            <Icon className={styles.icon} icon={ImportIcon} size={{ size: 40, strokeWidth: 1.5 }} />
-            <p className={styles.uploadText}>{t('dataset.import.upload.text')}</p>
-            <p className={styles.hintText}>{t('dataset.import.upload.hint')}</p>
-          </Center>
+          </Flexbox>
         )}
-      </Dragger>
-    </Flexbox>
-  );
-});
+
+        <Upload
+          dragger
+          accept={archiveOnly ? '.zip' : '.csv,.xlsx,.xls,.json,.jsonl,.zip'}
+          className={styles.dragger}
+          disabled={loading}
+          maxCount={1}
+          onFiles={([file]) => file && onFileSelect(file)}
+        >
+          {loading ? (
+            <Center className={styles.draggerContent} gap={16}>
+              <Icon
+                className={styles.icon}
+                icon={CloudUpload}
+                size={{ size: 44, strokeWidth: 1.5 }}
+              />
+              <p className={styles.uploadText}>{t('dataset.import.uploading')}</p>
+              {uploadProgress && (
+                <div className={styles.progressWrapper}>
+                  <Progress percent={uploadProgress.progress} size="small" />
+                </div>
+              )}
+            </Center>
+          ) : (
+            <Center className={styles.draggerContent} gap={12}>
+              <Icon
+                className={styles.icon}
+                icon={ImportIcon}
+                size={{ size: 44, strokeWidth: 1.5 }}
+              />
+              <p className={styles.uploadText}>{t('dataset.import.upload.text')}</p>
+              <p className={styles.hintText}>
+                {t(archiveOnly ? 'dataset.import.package.hint' : 'dataset.import.upload.hint')}
+              </p>
+            </Center>
+          )}
+        </Upload>
+        {archiveOnly && (
+          <p className={styles.hintText}>{t('dataset.import.package.instructions')}</p>
+        )}
+      </Flexbox>
+    );
+  },
+);
 
 export default UploadStep;

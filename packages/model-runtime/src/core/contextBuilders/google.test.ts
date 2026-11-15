@@ -1,8 +1,9 @@
 // @vitest-environment node
-import * as imageToBase64Module from '@lobechat/utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChatCompletionTool, OpenAIChatMessage, UserMessageContentPart } from '../../types';
+import * as imageToBase64Module from '../../utils/imageToBase64';
+import { serializeScopedSignature, type SignatureScope } from '../../utils/signatureScope';
 import { isPublicExternalUrl, parseDataUri, validateExternalUrl } from '../../utils/uriParser';
 import {
   buildGoogleMessage,
@@ -12,6 +13,50 @@ import {
   buildGoogleTools,
   GEMINI_MAGIC_THOUGHT_SIGNATURE,
 } from './google';
+
+const createUrlParseResult = (): ReturnType<typeof parseDataUri> => ({
+  base64: null,
+  mimeType: null,
+  type: 'url',
+});
+
+const createImagePart = (
+  imageUrl: string,
+): Extract<UserMessageContentPart, { type: 'image_url' }> => ({
+  image_url: { url: imageUrl },
+  type: 'image_url',
+});
+
+const createTestTool = (): ChatCompletionTool => ({
+  function: {
+    description: 'A test tool',
+    name: 'testTool',
+    parameters: {
+      properties: {
+        param1: { type: 'string' },
+        param2: { type: 'number' },
+      },
+      required: ['param1'],
+      type: 'object',
+    },
+  },
+  type: 'function',
+});
+
+const createSearchAssistantMessage = (): OpenAIChatMessage => ({
+  content: '',
+  role: 'assistant',
+  tool_calls: [
+    {
+      function: {
+        arguments: '{"query":"杭州天气","searchEngines":["google"]}',
+        name: 'lobe-web-browsing____search',
+      },
+      id: 'call_001',
+      type: 'function',
+    },
+  ],
+});
 
 // Mock the utils
 vi.mock('../../utils/uriParser', () => ({
@@ -23,6 +68,8 @@ vi.mock('../../utils/uriParser', () => ({
 vi.mock('../../utils/imageToBase64', () => ({
   imageUrlToBase64: vi.fn(),
 }));
+
+const thoughtSignatureScope: SignatureScope = { fingerprint: 'a'.repeat(32) };
 
 const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ';
 
@@ -128,10 +175,7 @@ describe('google contextBuilders', () => {
         mimeType: 'image/png',
       });
 
-      const content: UserMessageContentPart = {
-        image_url: { url: imageUrl },
-        type: 'image_url',
-      };
+      const content: UserMessageContentPart = createImagePart(imageUrl);
 
       const result = await buildGooglePart(content);
 
@@ -149,11 +193,7 @@ describe('google contextBuilders', () => {
     it('should use fileData for external URL images on gemini-3+', async () => {
       const imageUrl = 'https://example.com/image.png';
 
-      vi.mocked(parseDataUri).mockReturnValueOnce({
-        base64: null,
-        mimeType: null,
-        type: 'url',
-      });
+      vi.mocked(parseDataUri).mockReturnValueOnce(createUrlParseResult());
 
       vi.mocked(isPublicExternalUrl).mockReturnValueOnce(true);
       vi.mocked(validateExternalUrl).mockResolvedValueOnce({
@@ -162,17 +202,9 @@ describe('google contextBuilders', () => {
         isValid: true,
       });
 
-      const imageToBase64Spy = vi
-        .spyOn(imageToBase64Module, 'imageUrlToBase64')
-        .mockResolvedValueOnce({
-          base64: 'mockBase64Data',
-          mimeType: 'image/png',
-        });
+      const imageToBase64Spy = vi.spyOn(imageToBase64Module, 'imageUrlToBase64');
 
-      const content: UserMessageContentPart = {
-        image_url: { url: imageUrl },
-        type: 'image_url',
-      };
+      const content: UserMessageContentPart = createImagePart(imageUrl);
 
       const result = await buildGooglePart(content, { model: 'gemini-3-flash-preview' });
 
@@ -190,11 +222,7 @@ describe('google contextBuilders', () => {
     it('should fallback to inlineData when external URL validation fails for HEIC', async () => {
       const imageUrl = 'https://example.com/image.heic';
 
-      vi.mocked(parseDataUri).mockReturnValueOnce({
-        base64: null,
-        mimeType: null,
-        type: 'url',
-      });
+      vi.mocked(parseDataUri).mockReturnValueOnce(createUrlParseResult());
 
       vi.mocked(isPublicExternalUrl).mockReturnValueOnce(true);
       vi.mocked(validateExternalUrl).mockResolvedValueOnce({
@@ -211,10 +239,7 @@ describe('google contextBuilders', () => {
           mimeType: 'image/heic',
         });
 
-      const content: UserMessageContentPart = {
-        image_url: { url: imageUrl },
-        type: 'image_url',
-      };
+      const content: UserMessageContentPart = createImagePart(imageUrl);
 
       const result = await buildGooglePart(content, { model: 'gemini-3-flash-preview' });
 
@@ -232,11 +257,7 @@ describe('google contextBuilders', () => {
     it('should force inlineData for external URL images on gemini-2.5 and earlier', async () => {
       const imageUrl = 'https://example.com/image.png';
 
-      vi.mocked(parseDataUri).mockReturnValueOnce({
-        base64: null,
-        mimeType: null,
-        type: 'url',
-      });
+      vi.mocked(parseDataUri).mockReturnValueOnce(createUrlParseResult());
 
       const imageToBase64Spy = vi
         .spyOn(imageToBase64Module, 'imageUrlToBase64')
@@ -245,10 +266,7 @@ describe('google contextBuilders', () => {
           mimeType: 'image/png',
         });
 
-      const content: UserMessageContentPart = {
-        image_url: { url: imageUrl },
-        type: 'image_url',
-      };
+      const content: UserMessageContentPart = createImagePart(imageUrl);
 
       const result = await buildGooglePart(content, { model: 'gemini-2.5-flash' });
 
@@ -283,17 +301,9 @@ describe('google contextBuilders', () => {
         reason: 'File too large: 120MB',
       });
 
-      const imageToBase64Spy = vi
-        .spyOn(imageToBase64Module, 'imageUrlToBase64')
-        .mockResolvedValueOnce({
-          base64: 'mockBase64Data',
-          mimeType: 'image/png',
-        });
+      const imageToBase64Spy = vi.spyOn(imageToBase64Module, 'imageUrlToBase64');
 
-      const content: UserMessageContentPart = {
-        image_url: { url: imageUrl },
-        type: 'image_url',
-      };
+      const content: UserMessageContentPart = createImagePart(imageUrl);
 
       await expect(buildGooglePart(content, { model: 'gemini-3-flash' })).rejects.toThrow(
         RangeError,
@@ -346,11 +356,7 @@ describe('google contextBuilders', () => {
     it('should use fileData for external URL videos on gemini-3+', async () => {
       const videoUrl = 'https://example.com/video.mp4';
 
-      vi.mocked(parseDataUri).mockReturnValueOnce({
-        base64: null,
-        mimeType: null,
-        type: 'url',
-      });
+      vi.mocked(parseDataUri).mockReturnValueOnce(createUrlParseResult());
 
       vi.mocked(isPublicExternalUrl).mockReturnValueOnce(true);
       vi.mocked(validateExternalUrl).mockResolvedValueOnce({
@@ -359,12 +365,7 @@ describe('google contextBuilders', () => {
         isValid: true,
       });
 
-      const imageToBase64Spy = vi
-        .spyOn(imageToBase64Module, 'imageUrlToBase64')
-        .mockResolvedValueOnce({
-          base64: 'mockVideoBase64Data',
-          mimeType: 'video/mp4',
-        });
+      const imageToBase64Spy = vi.spyOn(imageToBase64Module, 'imageUrlToBase64');
 
       const content: UserMessageContentPart = {
         type: 'video_url',
@@ -431,14 +432,34 @@ describe('google contextBuilders', () => {
       });
     });
 
+    it('should use persisted recorder metadata when base64 audio omits its MIME type', async () => {
+      vi.mocked(parseDataUri).mockReturnValueOnce({
+        base64: 'mockAudioBase64Data',
+        mimeType: null,
+        type: 'base64',
+      });
+
+      const content: UserMessageContentPart = {
+        audio_url: {
+          mimeType: 'audio/wav;codecs=pcm',
+          url: 'data:;base64,mockAudioBase64Data',
+        },
+        type: 'audio_url',
+      };
+
+      await expect(buildGooglePart(content)).resolves.toEqual({
+        inlineData: {
+          data: 'mockAudioBase64Data',
+          mimeType: 'audio/wav',
+        },
+        thoughtSignature: GEMINI_MAGIC_THOUGHT_SIGNATURE,
+      });
+    });
+
     it('should use fileData for external URL audio on gemini-3+', async () => {
       const audioUrl = 'https://example.com/audio.mp3';
 
-      vi.mocked(parseDataUri).mockReturnValueOnce({
-        base64: null,
-        mimeType: null,
-        type: 'url',
-      });
+      vi.mocked(parseDataUri).mockReturnValueOnce(createUrlParseResult());
 
       vi.mocked(isPublicExternalUrl).mockReturnValueOnce(true);
       vi.mocked(validateExternalUrl).mockResolvedValueOnce({
@@ -447,12 +468,7 @@ describe('google contextBuilders', () => {
         isValid: true,
       });
 
-      const imageToBase64Spy = vi
-        .spyOn(imageToBase64Module, 'imageUrlToBase64')
-        .mockResolvedValueOnce({
-          base64: 'mockAudioBase64Data',
-          mimeType: 'audio/mpeg',
-        });
+      const imageToBase64Spy = vi.spyOn(imageToBase64Module, 'imageUrlToBase64');
 
       const content: UserMessageContentPart = {
         audio_url: { url: audioUrl },
@@ -469,6 +485,52 @@ describe('google contextBuilders', () => {
         thoughtSignature: GEMINI_MAGIC_THOUGHT_SIGNATURE,
       });
       expect(imageToBase64Spy).not.toHaveBeenCalled();
+    });
+
+    it('should use persisted recorder metadata when an external URL is octet-stream', async () => {
+      const audioUrl = 'https://example.com/voice';
+
+      vi.mocked(parseDataUri).mockReturnValueOnce(createUrlParseResult());
+      vi.mocked(isPublicExternalUrl).mockReturnValueOnce(true);
+      vi.mocked(validateExternalUrl).mockResolvedValueOnce({
+        contentLength: 1024,
+        contentType: 'application/octet-stream',
+        isValid: true,
+      });
+
+      const content: UserMessageContentPart = {
+        audio_url: { mimeType: 'audio/wav', url: audioUrl },
+        type: 'audio_url',
+      };
+
+      await expect(buildGooglePart(content, { model: 'gemini-3-flash-preview' })).resolves.toEqual({
+        fileData: {
+          fileUri: audioUrl,
+          mimeType: 'audio/wav',
+        },
+        thoughtSignature: GEMINI_MAGIC_THOUGHT_SIGNATURE,
+      });
+    });
+
+    it('should send audio MIME when an inlined audio URL is sniffed as a video container', async () => {
+      const audioUrl = 'https://example.com/voice-message.m4a';
+
+      vi.mocked(parseDataUri).mockReturnValueOnce(createUrlParseResult());
+      vi.mocked(isPublicExternalUrl).mockReturnValueOnce(false);
+      vi.spyOn(imageToBase64Module, 'imageUrlToBase64').mockResolvedValueOnce({
+        base64: 'm4aBase64Data',
+        mimeType: 'video/mp4',
+      });
+
+      const content: UserMessageContentPart = {
+        audio_url: { url: audioUrl },
+        type: 'audio_url',
+      };
+
+      await expect(buildGooglePart(content, { model: 'gemini-3.5-flash-lite' })).resolves.toEqual({
+        inlineData: { data: 'm4aBase64Data', mimeType: 'audio/mp4' },
+        thoughtSignature: GEMINI_MAGIC_THOUGHT_SIGNATURE,
+      });
     });
 
     it('should return undefined for unsupported SVG image (base64)', async () => {
@@ -493,11 +555,7 @@ describe('google contextBuilders', () => {
     it('should return undefined for unsupported SVG image (URL)', async () => {
       const svgUrl = 'https://example.com/image.svg';
 
-      vi.mocked(parseDataUri).mockReturnValueOnce({
-        base64: null,
-        mimeType: null,
-        type: 'url',
-      });
+      vi.mocked(parseDataUri).mockReturnValueOnce(createUrlParseResult());
 
       vi.spyOn(imageToBase64Module, 'imageUrlToBase64').mockResolvedValueOnce({
         base64: 'PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjwvc3ZnPg==',
@@ -655,14 +713,17 @@ describe('google contextBuilders', () => {
               name: 'grep____searchGitHub____mcp',
             },
             id: 'grep____searchGitHub____mcp_0_6RnOMTF0',
-            thoughtSignature:
-              'EsUHCsIHAdHtim9/MrjP+pnhM8DVkvulyfWQVf+isXQxEAbF32gbflE1hl6Te80qtp77Ywn8opB2uhQOIH/l6SStsj3+XRy1U1DTeKtqZxDBoLP2rNK6pi3/nk0ZOQIc8f6rxB70G/zOhk7d/1XQFqhmw5H+yDVRQjGD1cNPY5ctWGxQLAIk/HMWNovUJzz2c81jGWoXu7k2vtpuur2hcAL+J79BEVUTfvU3mSiXqJFTClmFPB6Fe79i0y3TwM2XdIBxzPgVgf8B+Pnv1S6YDxHNSm46jTlXKcSw30r3ixs5xEOzerbOUW5WG9BGukw/YQVvHiuoGLIALRa2Ig7dlOMH8+o+f0mKJtyYj8yF6wyBMol+G4mhSHvQSKJLj/Z5kFHvDZKeVUEOZed6vZivYLrVezjQPXgLHJMOmbp6QrZGxqW45QxDKY5X5F8giIOM8VgsUYhDQUBown+3vvwkIBA24icDsOwdhJ/roe9GabbGfxpkSzARIFh7rSI01cRKbh6cEaVFXf2WQftPeD7dBseQLiCdUYoy4ytECrjTpknrWnVUG6Ly4SKW6uN/IJXpm9JT9GgnGLIddFtEQzm9sIKWNpGEz6++lZpiCFS6LsYSnTP3vPj/7oSABRmwWywxA8EmLh+sv+jiK5aMjFi1sTuJ0Ujsvza3/SHZKewNi9WKQUDOa9Mqtjs2YGDnJxto4l5GMUzI5vhf6/+/A5eHALfVabaFP97v8FEPrXQU94dognwx4EnNqy/KWmGIlYZYqIfjaSAy7Z74viwl+oTtL9gyyBDc/FrQvXfyrYIq8N0pkLKAEh33fa/+YVocLL1LKI9rb2bg/RRr+Ee4NyIQKhIdEJaEh74d1COd/4r06J92ThkfVo5PEVTSsr8tBKiJ5wSmX9vyhbLWzxmXoq1xfGrs8kg7NMW53XEWGlQrIVOQmUtjjjBQKj6b4rBTAO6EKk63cGFbkSPohifiUBPHbxUUPy/hf0tQpeOo3jA01AuCFLOIZ5IYJ+Rm5+aZTU3Panv+Q7Yl1w5t5swhbNZfg7MlU/sxwLijLuWDDNfw+2Zw/aa3VDPgVw6Nv2vKkHi4tUU0XlgfiQgQYUMPxpGRV837uUxvZFNep2QUlAMog5h4sMYJWIAX1kK1pzsyR/KxuCn6nUq4ovWNBQHLC4aW2ZcGgW/6CbF81F1cewUz+vWNMMkJrL0d9celGEbFuY0Q709UipaDbCg49twlnLV9XUwqC5wYTFBiJbynBDqiZAvXn2YOxNIs8CCzuu2GSCQDo09ksJy5g/o=',
+            thoughtSignature: serializeScopedSignature(
+              'provider-signature',
+              thoughtSignatureScope,
+              'thought_signature',
+            ),
             type: 'function',
           },
         ],
       } as OpenAIChatMessage;
 
-      const converted = await buildGoogleMessage(message);
+      const converted = await buildGoogleMessage(message, undefined, { thoughtSignatureScope });
 
       expect(converted).toEqual({
         parts: [
@@ -676,8 +737,7 @@ describe('google contextBuilders', () => {
               },
               name: 'grep____searchGitHub____mcp',
             },
-            thoughtSignature:
-              'EsUHCsIHAdHtim9/MrjP+pnhM8DVkvulyfWQVf+isXQxEAbF32gbflE1hl6Te80qtp77Ywn8opB2uhQOIH/l6SStsj3+XRy1U1DTeKtqZxDBoLP2rNK6pi3/nk0ZOQIc8f6rxB70G/zOhk7d/1XQFqhmw5H+yDVRQjGD1cNPY5ctWGxQLAIk/HMWNovUJzz2c81jGWoXu7k2vtpuur2hcAL+J79BEVUTfvU3mSiXqJFTClmFPB6Fe79i0y3TwM2XdIBxzPgVgf8B+Pnv1S6YDxHNSm46jTlXKcSw30r3ixs5xEOzerbOUW5WG9BGukw/YQVvHiuoGLIALRa2Ig7dlOMH8+o+f0mKJtyYj8yF6wyBMol+G4mhSHvQSKJLj/Z5kFHvDZKeVUEOZed6vZivYLrVezjQPXgLHJMOmbp6QrZGxqW45QxDKY5X5F8giIOM8VgsUYhDQUBown+3vvwkIBA24icDsOwdhJ/roe9GabbGfxpkSzARIFh7rSI01cRKbh6cEaVFXf2WQftPeD7dBseQLiCdUYoy4ytECrjTpknrWnVUG6Ly4SKW6uN/IJXpm9JT9GgnGLIddFtEQzm9sIKWNpGEz6++lZpiCFS6LsYSnTP3vPj/7oSABRmwWywxA8EmLh+sv+jiK5aMjFi1sTuJ0Ujsvza3/SHZKewNi9WKQUDOa9Mqtjs2YGDnJxto4l5GMUzI5vhf6/+/A5eHALfVabaFP97v8FEPrXQU94dognwx4EnNqy/KWmGIlYZYqIfjaSAy7Z74viwl+oTtL9gyyBDc/FrQvXfyrYIq8N0pkLKAEh33fa/+YVocLL1LKI9rb2bg/RRr+Ee4NyIQKhIdEJaEh74d1COd/4r06J92ThkfVo5PEVTSsr8tBKiJ5wSmX9vyhbLWzxmXoq1xfGrs8kg7NMW53XEWGlQrIVOQmUtjjjBQKj6b4rBTAO6EKk63cGFbkSPohifiUBPHbxUUPy/hf0tQpeOo3jA01AuCFLOIZ5IYJ+Rm5+aZTU3Panv+Q7Yl1w5t5swhbNZfg7MlU/sxwLijLuWDDNfw+2Zw/aa3VDPgVw6Nv2vKkHi4tUU0XlgfiQgQYUMPxpGRV837uUxvZFNep2QUlAMog5h4sMYJWIAX1kK1pzsyR/KxuCn6nUq4ovWNBQHLC4aW2ZcGgW/6CbF81F1cewUz+vWNMMkJrL0d9celGEbFuY0Q709UipaDbCg49twlnLV9XUwqC5wYTFBiJbynBDqiZAvXn2YOxNIs8CCzuu2GSCQDo09ksJy5g/o=',
+            thoughtSignature: 'provider-signature',
           },
         ],
         role: 'model',
@@ -695,20 +755,7 @@ describe('google contextBuilders', () => {
             content: '杭州天气如何',
             role: 'user',
           },
-          {
-            content: '',
-            role: 'assistant',
-            tool_calls: [
-              {
-                function: {
-                  arguments: '{"query":"杭州天气","searchEngines":["google"]}',
-                  name: 'lobe-web-browsing____search',
-                },
-                id: 'call_001',
-                type: 'function',
-              },
-            ],
-          },
+          createSearchAssistantMessage(),
           {
             content: 'Tool execution was aborted by user.',
             name: 'lobe-web-browsing____search',
@@ -819,7 +866,11 @@ describe('google contextBuilders', () => {
                   name: 'lobe-web-browsing____search',
                 },
                 id: 'call_001',
-                thoughtSignature: existingSignature,
+                thoughtSignature: serializeScopedSignature(
+                  existingSignature,
+                  thoughtSignatureScope,
+                  'thought_signature',
+                ),
                 type: 'function',
               },
             ],
@@ -832,7 +883,7 @@ describe('google contextBuilders', () => {
           },
         ];
 
-        const contents = await buildGoogleMessages(messages);
+        const contents = await buildGoogleMessages(messages, { thoughtSignatureScope });
 
         expect(contents).toEqual([
           {
@@ -864,6 +915,37 @@ describe('google contextBuilders', () => {
             role: 'user',
           },
         ]);
+      });
+
+      it('should replace foreign and legacy thought signatures with the magic signature', async () => {
+        const foreignScope: SignatureScope = { fingerprint: 'b'.repeat(32) };
+        const createMessages = (thoughtSignature: string): OpenAIChatMessage[] => [
+          {
+            content: '',
+            role: 'assistant',
+            tool_calls: [
+              {
+                function: { arguments: '{}', name: 'get_weather' },
+                id: 'call_001',
+                thoughtSignature,
+                type: 'function',
+              },
+            ],
+          },
+        ];
+
+        const foreign = await buildGoogleMessages(
+          createMessages(
+            serializeScopedSignature('foreign-signature', foreignScope, 'thought_signature')!,
+          ),
+          { thoughtSignatureScope },
+        );
+        const legacy = await buildGoogleMessages(createMessages('legacy-signature'), {
+          thoughtSignatureScope,
+        });
+
+        expect(foreign[0].parts?.[0].thoughtSignature).toBe(GEMINI_MAGIC_THOUGHT_SIGNATURE);
+        expect(legacy[0].parts?.[0].thoughtSignature).toBe(GEMINI_MAGIC_THOUGHT_SIGNATURE);
       });
 
       it('should add magic signature to all function calls in multi-turn scenario', async () => {
@@ -989,20 +1071,7 @@ describe('google contextBuilders', () => {
             content: '杭州天气如何',
             role: 'user',
           },
-          {
-            content: '',
-            role: 'assistant',
-            tool_calls: [
-              {
-                function: {
-                  arguments: '{"query":"杭州天气","searchEngines":["google"]}',
-                  name: 'lobe-web-browsing____search',
-                },
-                id: 'call_001',
-                type: 'function',
-              },
-            ],
-          },
+          createSearchAssistantMessage(),
           {
             content: 'Tool execution was aborted by user.',
             name: 'lobe-web-browsing____search',
@@ -1101,6 +1170,56 @@ describe('google contextBuilders', () => {
         ],
         role: 'user',
       });
+    });
+
+    it('should preserve function call IDs for Gemini 3.6', async () => {
+      const messages: OpenAIChatMessage[] = [
+        {
+          content: '',
+          role: 'assistant',
+          tool_calls: [
+            {
+              function: { arguments: '{"location":"London"}', name: 'get_weather' },
+              id: 'call_weather_1',
+              type: 'function',
+            },
+          ],
+        },
+        {
+          content: '{"temperature":14}',
+          role: 'tool',
+          tool_call_id: 'call_weather_1',
+        },
+      ];
+
+      const converted = await buildGoogleMessages(messages, { model: 'gemini-3.6-flash' });
+
+      expect(converted).toMatchObject([
+        {
+          parts: [
+            {
+              functionCall: {
+                args: { location: 'London' },
+                id: 'call_weather_1',
+                name: 'get_weather',
+              },
+            },
+          ],
+          role: 'model',
+        },
+        {
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_weather_1',
+                name: 'get_weather',
+                response: { result: '{"temperature":14}' },
+              },
+            },
+          ],
+          role: 'user',
+        },
+      ]);
     });
   });
 
@@ -1377,7 +1496,11 @@ describe('google contextBuilders', () => {
                 name: 'grep____searchGitHub____mcp',
               },
               id: 'grep____searchGitHub____mcp_0_6RnOMTF0',
-              thoughtSignature: 'test-signature',
+              thoughtSignature: serializeScopedSignature(
+                'test-signature',
+                thoughtSignatureScope,
+                'thought_signature',
+              ),
               type: 'function',
             },
           ],
@@ -1390,7 +1513,7 @@ describe('google contextBuilders', () => {
         },
       ];
 
-      const contents = await buildGoogleMessages(messages);
+      const contents = await buildGoogleMessages(messages, { thoughtSignatureScope });
 
       expect(contents).toEqual([
         {
@@ -1435,21 +1558,7 @@ describe('google contextBuilders', () => {
 
   describe('buildGoogleTool', () => {
     it('should use parametersJsonSchema to pass standard JSON Schema directly', () => {
-      const tool: ChatCompletionTool = {
-        function: {
-          description: 'A test tool',
-          name: 'testTool',
-          parameters: {
-            properties: {
-              param1: { type: 'string' },
-              param2: { type: 'number' },
-            },
-            required: ['param1'],
-            type: 'object',
-          },
-        },
-        type: 'function',
-      };
+      const tool: ChatCompletionTool = createTestTool();
 
       const result = buildGoogleTool(tool);
 
@@ -1620,23 +1729,7 @@ describe('google contextBuilders', () => {
     });
 
     it('should correctly convert ChatCompletionTool array to GoogleFunctionCallTool', () => {
-      const tools: ChatCompletionTool[] = [
-        {
-          function: {
-            description: 'A test tool',
-            name: 'testTool',
-            parameters: {
-              properties: {
-                param1: { type: 'string' },
-                param2: { type: 'number' },
-              },
-              required: ['param1'],
-              type: 'object',
-            },
-          },
-          type: 'function',
-        },
-      ];
+      const tools: ChatCompletionTool[] = [createTestTool()];
 
       const googleTools = buildGoogleTools(tools);
 

@@ -1,11 +1,12 @@
 // @vitest-environment node
+import type { KnowledgeBaseItem } from '@lobechat/types';
 import { and, eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { sleep } from '@/utils/sleep';
 
 import { getTestDB } from '../../core/getTestDB';
-import type { NewKnowledgeBase } from '../../schemas';
+import type { NewDocument, NewKnowledgeBase } from '../../schemas';
 import {
   documents,
   files,
@@ -134,27 +135,80 @@ describe('KnowledgeBaseModel', () => {
         userId,
       });
     });
+
+    // Regression: a shared knowledge base is editable by any member holding
+    // `edit` access, so the generic update must not be a back door into the
+    // identity and scope columns that transfer / publish own.
+    it('ignores identity and scope columns', async () => {
+      const { id } = await knowledgeBaseModel.create({ name: 'Test Group' });
+
+      await knowledgeBaseModel.update(id, {
+        id: 'hijacked-id',
+        name: 'Renamed',
+        userId: 'user2',
+        visibility: 'private',
+        // Not on `KnowledgeBaseItem`, but a JSON payload can carry it in.
+        workspaceId: 'some-other-workspace',
+      } as Partial<KnowledgeBaseItem>);
+
+      const updated = await serverDB.query.knowledgeBases.findFirst({
+        where: eq(knowledgeBases.id, id),
+      });
+      expect(updated).toMatchObject({
+        id,
+        name: 'Renamed',
+        userId,
+        visibility: 'public',
+        workspaceId: null,
+      });
+    });
+  });
+
+  const createGlobalFile = (
+    hashId: string,
+    name: string,
+    size: number,
+    fileType = 'application/pdf',
+  ) => ({
+    hashId,
+    url: `https://example.com/${name}`,
+    size,
+    fileType,
+    creator: userId,
+  });
+
+  const createFile = (
+    id: string,
+    name: string,
+    fileHash: string,
+    size: number,
+    fileType = 'application/pdf',
+  ) => ({
+    id,
+    name,
+    url: `https://example.com/${name}`,
+    fileHash,
+    size,
+    fileType,
+    userId,
+  });
+
+  const createDocument = (id: string): NewDocument => ({
+    id,
+    title: 'Test Document',
+    content: 'Test content',
+    fileType: 'application/pdf',
+    totalCharCount: 100,
+    totalLineCount: 10,
+    sourceType: 'file',
+    source: 'test.pdf',
+    fileId: 'file1',
+    userId,
   });
 
   const fileList = [
-    {
-      id: 'file1',
-      name: 'document.pdf',
-      url: 'https://example.com/document.pdf',
-      fileHash: 'hash1',
-      size: 1000,
-      fileType: 'application/pdf',
-      userId,
-    },
-    {
-      id: 'file2',
-      name: 'image.jpg',
-      url: 'https://example.com/image.jpg',
-      fileHash: 'hash2',
-      size: 500,
-      fileType: 'image/jpeg',
-      userId,
-    },
+    createFile('file1', 'document.pdf', 'hash1', 1000),
+    createFile('file2', 'image.jpg', 'hash2', 500, 'image/jpeg'),
   ];
 
   const createWorkspace = async (id: string, slug: string) => {
@@ -168,22 +222,12 @@ describe('KnowledgeBaseModel', () => {
 
   describe('addFilesToKnowledgeBase', () => {
     it('should add files to a knowledge base', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/document.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-        {
-          hashId: 'hash2',
-          url: 'https://example.com/image.jpg',
-          size: 500,
-          fileType: 'image/jpeg',
-          creator: userId,
-        },
-      ]);
+      await serverDB
+        .insert(globalFiles)
+        .values([
+          createGlobalFile('hash1', 'document.pdf', 1000),
+          createGlobalFile('hash2', 'image.jpg', 500, 'image/jpeg'),
+        ]);
 
       await serverDB.insert(files).values(fileList);
 
@@ -206,44 +250,13 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should add documents (with docs_ prefix) to a knowledge base by resolving to file IDs', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/document.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
+      await serverDB.insert(globalFiles).values([createGlobalFile('hash1', 'document.pdf', 1000)]);
 
       // Create mirror file first (document references it via fileId)
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'document.pdf',
-          url: 'https://example.com/document.pdf',
-          fileHash: 'hash1',
-          size: 1000,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB.insert(files).values([createFile('file1', 'document.pdf', 'hash1', 1000)]);
 
       // Create document with fileId pointing to the mirror file
-      await serverDB.insert(documents).values([
-        {
-          id: 'docs_test123',
-          title: 'Test Document',
-          content: 'Test content',
-          fileType: 'application/pdf',
-          totalCharCount: 100,
-          totalLineCount: 10,
-          sourceType: 'file',
-          source: 'test.pdf',
-          fileId: 'file1',
-          userId,
-        },
-      ]);
+      await serverDB.insert(documents).values([createDocument('docs_test123')]);
 
       const { id: knowledgeBaseId } = await knowledgeBaseModel.create({ name: 'Test Group' });
 
@@ -408,52 +421,21 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should handle mixed document IDs and file IDs', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/document.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-        {
-          hashId: 'hash2',
-          url: 'https://example.com/image.jpg',
-          size: 500,
-          fileType: 'image/jpeg',
-          creator: userId,
-        },
-      ]);
+      await serverDB
+        .insert(globalFiles)
+        .values([
+          createGlobalFile('hash1', 'document.pdf', 1000),
+          createGlobalFile('hash2', 'image.jpg', 500, 'image/jpeg'),
+        ]);
 
       // Create files - file1 is mirror of the document, file2 is standalone
       await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'document.pdf',
-          url: 'https://example.com/document.pdf',
-          fileHash: 'hash1',
-          size: 1000,
-          fileType: 'application/pdf',
-          userId,
-        },
+        createFile('file1', 'document.pdf', 'hash1', 1000),
         fileList[1], // file2 - standalone file
       ]);
 
       // Create document with fileId pointing to the mirror file
-      await serverDB.insert(documents).values([
-        {
-          id: 'docs_test456',
-          title: 'Test Document',
-          content: 'Test content',
-          fileType: 'application/pdf',
-          totalCharCount: 100,
-          totalLineCount: 10,
-          sourceType: 'file',
-          source: 'test.pdf',
-          fileId: 'file1',
-          userId,
-        },
-      ]);
+      await serverDB.insert(documents).values([createDocument('docs_test456')]);
 
       const { id: knowledgeBaseId } = await knowledgeBaseModel.create({ name: 'Test Group' });
 
@@ -471,22 +453,12 @@ describe('KnowledgeBaseModel', () => {
 
   describe('removeFilesFromKnowledgeBase', () => {
     it('should remove files from a knowledge base', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/document.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-        {
-          hashId: 'hash2',
-          url: 'https://example.com/image.jpg',
-          size: 500,
-          fileType: 'image/jpeg',
-          creator: userId,
-        },
-      ]);
+      await serverDB
+        .insert(globalFiles)
+        .values([
+          createGlobalFile('hash1', 'document.pdf', 1000),
+          createGlobalFile('hash2', 'image.jpg', 500, 'image/jpeg'),
+        ]);
 
       await serverDB.insert(files).values(fileList);
 
@@ -505,44 +477,13 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should remove documents (with docs_ prefix) from a knowledge base by resolving to file IDs', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/document.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
+      await serverDB.insert(globalFiles).values([createGlobalFile('hash1', 'document.pdf', 1000)]);
 
       // Create mirror file first (document references it via fileId)
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'document.pdf',
-          url: 'https://example.com/document.pdf',
-          fileHash: 'hash1',
-          size: 1000,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB.insert(files).values([createFile('file1', 'document.pdf', 'hash1', 1000)]);
 
       // Create document with fileId pointing to the mirror file
-      await serverDB.insert(documents).values([
-        {
-          id: 'docs_test789',
-          title: 'Test Document',
-          content: 'Test content',
-          fileType: 'application/pdf',
-          totalCharCount: 100,
-          totalLineCount: 10,
-          sourceType: 'file',
-          source: 'test.pdf',
-          fileId: 'file1',
-          userId,
-        },
-      ]);
+      await serverDB.insert(documents).values([createDocument('docs_test789')]);
 
       const { id: knowledgeBaseId } = await knowledgeBaseModel.create({ name: 'Test Group' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(knowledgeBaseId, ['docs_test789']);
@@ -563,27 +504,9 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should handle removing document IDs that resolve to null fileIds (empty resolvedFileIds)', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/document.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
+      await serverDB.insert(globalFiles).values([createGlobalFile('hash1', 'document.pdf', 1000)]);
 
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'document.pdf',
-          url: 'https://example.com/document.pdf',
-          fileHash: 'hash1',
-          size: 1000,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB.insert(files).values([createFile('file1', 'document.pdf', 'hash1', 1000)]);
 
       const { id: knowledgeBaseId } = await knowledgeBaseModel.create({ name: 'Test Group' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(knowledgeBaseId, ['file1']);
@@ -618,15 +541,7 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should not allow removing files from another user knowledge base', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/document.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
+      await serverDB.insert(globalFiles).values([createGlobalFile('hash1', 'document.pdf', 1000)]);
 
       await serverDB.insert(files).values([fileList[0]]);
 
@@ -648,42 +563,15 @@ describe('KnowledgeBaseModel', () => {
 
   describe('findExclusiveFileIds', () => {
     it('should return file IDs that belong only to this knowledge base', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/a.pdf',
-          size: 100,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-        {
-          hashId: 'hash2',
-          url: 'https://example.com/b.pdf',
-          size: 200,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'a.pdf',
-          url: 'https://example.com/a.pdf',
-          fileHash: 'hash1',
-          size: 100,
-          fileType: 'application/pdf',
-          userId,
-        },
-        {
-          id: 'file2',
-          name: 'b.pdf',
-          url: 'https://example.com/b.pdf',
-          fileHash: 'hash2',
-          size: 200,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB
+        .insert(globalFiles)
+        .values([createGlobalFile('hash1', 'a.pdf', 100), createGlobalFile('hash2', 'b.pdf', 200)]);
+      await serverDB
+        .insert(files)
+        .values([
+          createFile('file1', 'a.pdf', 'hash1', 100),
+          createFile('file2', 'b.pdf', 'hash2', 200),
+        ]);
       const { id: kb1 } = await knowledgeBaseModel.create({ name: 'KB1' });
       const { id: kb2 } = await knowledgeBaseModel.create({ name: 'KB2' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(kb1, ['file1', 'file2']);
@@ -693,26 +581,8 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should return empty array when all files are shared', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/a.pdf',
-          size: 100,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'a.pdf',
-          url: 'https://example.com/a.pdf',
-          fileHash: 'hash1',
-          size: 100,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB.insert(globalFiles).values([createGlobalFile('hash1', 'a.pdf', 100)]);
+      await serverDB.insert(files).values([createFile('file1', 'a.pdf', 'hash1', 100)]);
       const { id: kb1 } = await knowledgeBaseModel.create({ name: 'KB1' });
       const { id: kb2 } = await knowledgeBaseModel.create({ name: 'KB2' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(kb1, ['file1']);
@@ -722,42 +592,15 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should return all files when none are shared', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/a.pdf',
-          size: 100,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-        {
-          hashId: 'hash2',
-          url: 'https://example.com/b.pdf',
-          size: 200,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'a.pdf',
-          url: 'https://example.com/a.pdf',
-          fileHash: 'hash1',
-          size: 100,
-          fileType: 'application/pdf',
-          userId,
-        },
-        {
-          id: 'file2',
-          name: 'b.pdf',
-          url: 'https://example.com/b.pdf',
-          fileHash: 'hash2',
-          size: 200,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB
+        .insert(globalFiles)
+        .values([createGlobalFile('hash1', 'a.pdf', 100), createGlobalFile('hash2', 'b.pdf', 200)]);
+      await serverDB
+        .insert(files)
+        .values([
+          createFile('file1', 'a.pdf', 'hash1', 100),
+          createFile('file2', 'b.pdf', 'hash2', 200),
+        ]);
       const { id: kb1 } = await knowledgeBaseModel.create({ name: 'KB1' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(kb1, ['file1', 'file2']);
       const exclusiveIds = await knowledgeBaseModel.findExclusiveFileIds(kb1);
@@ -773,26 +616,8 @@ describe('KnowledgeBaseModel', () => {
 
   describe('deleteWithFiles', () => {
     it('should delete KB and its exclusive files', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/a.pdf',
-          size: 100,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'a.pdf',
-          url: 'https://example.com/a.pdf',
-          fileHash: 'hash1',
-          size: 100,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB.insert(globalFiles).values([createGlobalFile('hash1', 'a.pdf', 100)]);
+      await serverDB.insert(files).values([createFile('file1', 'a.pdf', 'hash1', 100)]);
       const { id: kbId } = await knowledgeBaseModel.create({ name: 'KB1' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(kbId, ['file1']);
       const result = await knowledgeBaseModel.deleteWithFiles(kbId);
@@ -810,42 +635,15 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should NOT delete files shared with another KB', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/a.pdf',
-          size: 100,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-        {
-          hashId: 'hash2',
-          url: 'https://example.com/b.pdf',
-          size: 200,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'a.pdf',
-          url: 'https://example.com/a.pdf',
-          fileHash: 'hash1',
-          size: 100,
-          fileType: 'application/pdf',
-          userId,
-        },
-        {
-          id: 'file2',
-          name: 'b.pdf',
-          url: 'https://example.com/b.pdf',
-          fileHash: 'hash2',
-          size: 200,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB
+        .insert(globalFiles)
+        .values([createGlobalFile('hash1', 'a.pdf', 100), createGlobalFile('hash2', 'b.pdf', 200)]);
+      await serverDB
+        .insert(files)
+        .values([
+          createFile('file1', 'a.pdf', 'hash1', 100),
+          createFile('file2', 'b.pdf', 'hash2', 200),
+        ]);
       const { id: kb1 } = await knowledgeBaseModel.create({ name: 'KB1' });
       const { id: kb2 } = await knowledgeBaseModel.create({ name: 'KB2' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(kb1, ['file1', 'file2']);
@@ -878,42 +676,15 @@ describe('KnowledgeBaseModel', () => {
 
   describe('deleteAllWithFiles', () => {
     it('should delete all KBs and their exclusive files', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/a.pdf',
-          size: 100,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-        {
-          hashId: 'hash2',
-          url: 'https://example.com/b.pdf',
-          size: 200,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'a.pdf',
-          url: 'https://example.com/a.pdf',
-          fileHash: 'hash1',
-          size: 100,
-          fileType: 'application/pdf',
-          userId,
-        },
-        {
-          id: 'file2',
-          name: 'b.pdf',
-          url: 'https://example.com/b.pdf',
-          fileHash: 'hash2',
-          size: 200,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB
+        .insert(globalFiles)
+        .values([createGlobalFile('hash1', 'a.pdf', 100), createGlobalFile('hash2', 'b.pdf', 200)]);
+      await serverDB
+        .insert(files)
+        .values([
+          createFile('file1', 'a.pdf', 'hash1', 100),
+          createFile('file2', 'b.pdf', 'hash2', 200),
+        ]);
       const { id: kb1 } = await knowledgeBaseModel.create({ name: 'KB1' });
       const { id: kb2 } = await knowledgeBaseModel.create({ name: 'KB2' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(kb1, ['file1']);
@@ -933,26 +704,8 @@ describe('KnowledgeBaseModel', () => {
     });
 
     it('should delete shared file when both KBs sharing it are deleted', async () => {
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash1',
-          url: 'https://example.com/a.pdf',
-          size: 100,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
-      await serverDB.insert(files).values([
-        {
-          id: 'file1',
-          name: 'a.pdf',
-          url: 'https://example.com/a.pdf',
-          fileHash: 'hash1',
-          size: 100,
-          fileType: 'application/pdf',
-          userId,
-        },
-      ]);
+      await serverDB.insert(globalFiles).values([createGlobalFile('hash1', 'a.pdf', 100)]);
+      await serverDB.insert(files).values([createFile('file1', 'a.pdf', 'hash1', 100)]);
       const { id: kb1 } = await knowledgeBaseModel.create({ name: 'KB1' });
       const { id: kb2 } = await knowledgeBaseModel.create({ name: 'KB2' });
       await knowledgeBaseModel.addFilesToKnowledgeBase(kb1, ['file1']);
@@ -977,24 +730,12 @@ describe('KnowledgeBaseModel', () => {
   describe('transferTo', () => {
     it('should transfer a knowledge base and its resources to another workspace', async () => {
       await createWorkspace('workspace-target', 'workspace-target');
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash-transfer',
-          url: 'https://example.com/transfer.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
-      await serverDB.insert(files).values({
-        id: 'file-transfer',
-        name: 'transfer.pdf',
-        url: 'https://example.com/transfer.pdf',
-        fileHash: 'hash-transfer',
-        size: 1000,
-        fileType: 'application/pdf',
-        userId,
-      });
+      await serverDB
+        .insert(globalFiles)
+        .values([createGlobalFile('hash-transfer', 'transfer.pdf', 1000)]);
+      await serverDB
+        .insert(files)
+        .values(createFile('file-transfer', 'transfer.pdf', 'hash-transfer', 1000));
 
       const { id: knowledgeBaseId } = await knowledgeBaseModel.create({ name: 'Transfer KB' });
       await serverDB.insert(documents).values({
@@ -1051,15 +792,7 @@ describe('KnowledgeBaseModel', () => {
   describe('copyToWorkspace', () => {
     it('should copy a knowledge base with files and document hierarchy to another workspace', async () => {
       await createWorkspace('workspace-copy-target', 'workspace-copy-target');
-      await serverDB.insert(globalFiles).values([
-        {
-          hashId: 'hash-copy',
-          url: 'https://example.com/copy.pdf',
-          size: 1000,
-          fileType: 'application/pdf',
-          creator: userId,
-        },
-      ]);
+      await serverDB.insert(globalFiles).values([createGlobalFile('hash-copy', 'copy.pdf', 1000)]);
 
       const { id: knowledgeBaseId } = await knowledgeBaseModel.create({ name: 'Copy KB' });
       await serverDB.insert(documents).values([
@@ -1178,6 +911,274 @@ describe('KnowledgeBaseModel', () => {
         id,
         name: 'Another User Group',
         userId: 'user2',
+      });
+    });
+  });
+
+  describe('workspace visibility', () => {
+    const wsId = 'knowledge-base-ws';
+    const ownerModel = new KnowledgeBaseModel(serverDB, userId, wsId);
+    const memberModel = new KnowledgeBaseModel(serverDB, 'user2', wsId);
+
+    beforeEach(async () => {
+      await createWorkspace(wsId, wsId);
+    });
+
+    afterEach(async () => {
+      await serverDB.delete(workspaces).where(eq(workspaces.id, wsId));
+    });
+
+    describe('query with visibility filter', () => {
+      it('should limit the result set to private rows when visibility=private is requested', async () => {
+        await ownerModel.create({ name: 'Owner Private KB', visibility: 'private' });
+        await ownerModel.create({ name: 'Owner Public KB', visibility: 'public' });
+
+        const result = await ownerModel.query({ visibility: 'private' });
+        const names = result.map((kb) => kb.name);
+
+        expect(names).toContain('Owner Private KB');
+        expect(names).not.toContain('Owner Public KB');
+      });
+
+      it('should limit the result set to public rows when visibility=public is requested', async () => {
+        await ownerModel.create({ name: 'Owner Private KB', visibility: 'private' });
+        await ownerModel.create({ name: 'Owner Public KB', visibility: 'public' });
+
+        const result = await ownerModel.query({ visibility: 'public' });
+        const names = result.map((kb) => kb.name);
+
+        expect(names).toContain('Owner Public KB');
+        expect(names).not.toContain('Owner Private KB');
+      });
+
+      it('should hide other members’ private rows from a public-agent caller', async () => {
+        await ownerModel.create({ name: 'Owner Private KB', visibility: 'private' });
+        await ownerModel.create({ name: 'Owner Public KB', visibility: 'public' });
+        await memberModel.create({ name: 'Member Private KB', visibility: 'private' });
+
+        const seenByMemberViaPublicAgent = await memberModel.query({
+          callerAgentVisibility: 'public',
+        });
+        const names = seenByMemberViaPublicAgent.map((kb) => kb.name);
+
+        expect(names).toContain('Owner Public KB');
+        expect(names).not.toContain('Owner Private KB');
+        expect(names).not.toContain('Member Private KB');
+      });
+
+      it('should still let a private-agent caller see their own private rows', async () => {
+        await ownerModel.create({ name: 'Owner Private KB', visibility: 'private' });
+        await memberModel.create({ name: 'Member Private KB', visibility: 'private' });
+
+        const seenByMemberViaPrivateAgent = await memberModel.query({
+          callerAgentVisibility: 'private',
+        });
+        const names = seenByMemberViaPrivateAgent.map((kb) => kb.name);
+
+        expect(names).toContain('Member Private KB');
+        expect(names).not.toContain('Owner Private KB');
+      });
+    });
+
+    it('should align newly added creator-owned content with the library visibility', async () => {
+      const created = await ownerModel.create({ name: 'Public Library', visibility: 'public' });
+      await serverDB.insert(files).values({
+        id: 'workspace-private-file-to-add',
+        fileType: 'text/plain',
+        name: 'Private file to add',
+        size: 10,
+        url: 'internal://private-file-to-add',
+        userId,
+        visibility: 'private',
+        workspaceId: wsId,
+      });
+
+      await ownerModel.addFilesToKnowledgeBase(created.id, ['workspace-private-file-to-add']);
+
+      const addedFile = await serverDB.query.files.findFirst({
+        where: eq(files.id, 'workspace-private-file-to-add'),
+      });
+      expect(addedFile?.visibility).toBe('public');
+    });
+
+    describe('publishToWorkspace', () => {
+      it('should synchronize creator-owned contents without rewriting another member’s file', async () => {
+        const created = await ownerModel.create({ name: 'Shared Contents', visibility: 'private' });
+        await serverDB.insert(files).values([
+          {
+            id: 'workspace-owner-file',
+            fileType: 'text/plain',
+            name: 'Owner file',
+            size: 10,
+            url: 'internal://owner-file',
+            userId,
+            visibility: 'private',
+            workspaceId: wsId,
+          },
+          {
+            id: 'workspace-member-file',
+            fileType: 'text/plain',
+            name: 'Member file',
+            size: 10,
+            url: 'internal://member-file',
+            userId: 'user2',
+            visibility: 'public',
+            workspaceId: wsId,
+          },
+        ]);
+        await serverDB.insert(documents).values({
+          id: 'docs_workspace_owner',
+          content: 'Owner page',
+          fileId: 'workspace-owner-file',
+          fileType: 'custom/document',
+          knowledgeBaseId: created.id,
+          source: 'document',
+          sourceType: 'api',
+          title: 'Owner page',
+          totalCharCount: 10,
+          totalLineCount: 1,
+          userId,
+          visibility: 'private',
+          workspaceId: wsId,
+        });
+        await serverDB.insert(knowledgeBaseFiles).values([
+          {
+            fileId: 'workspace-owner-file',
+            knowledgeBaseId: created.id,
+            userId,
+            workspaceId: wsId,
+          },
+          {
+            fileId: 'workspace-member-file',
+            knowledgeBaseId: created.id,
+            userId: 'user2',
+            workspaceId: wsId,
+          },
+        ]);
+
+        await ownerModel.publishToWorkspace(created.id);
+
+        const publishedOwnerFile = await serverDB.query.files.findFirst({
+          where: eq(files.id, 'workspace-owner-file'),
+        });
+        const publishedOwnerDocument = await serverDB.query.documents.findFirst({
+          where: eq(documents.id, 'docs_workspace_owner'),
+        });
+        expect(publishedOwnerFile?.visibility).toBe('public');
+        expect(publishedOwnerDocument?.visibility).toBe('public');
+
+        await ownerModel.setVisibility(created.id, 'private');
+
+        const privateOwnerFile = await serverDB.query.files.findFirst({
+          where: eq(files.id, 'workspace-owner-file'),
+        });
+        const privateOwnerDocument = await serverDB.query.documents.findFirst({
+          where: eq(documents.id, 'docs_workspace_owner'),
+        });
+        const untouchedMemberFile = await serverDB.query.files.findFirst({
+          where: eq(files.id, 'workspace-member-file'),
+        });
+        expect(privateOwnerFile?.visibility).toBe('private');
+        expect(privateOwnerDocument?.visibility).toBe('private');
+        expect(untouchedMemberFile?.visibility).toBe('public');
+      });
+
+      it('should flip the creator’s own private KB to public', async () => {
+        const created = await ownerModel.create({ name: 'To Publish', visibility: 'private' });
+
+        await ownerModel.publishToWorkspace(created.id);
+
+        const row = await serverDB.query.knowledgeBases.findFirst({
+          where: eq(knowledgeBases.id, created.id),
+        });
+        expect(row?.visibility).toBe('public');
+      });
+
+      it('should reconcile stale content without touching an already-public KB timestamp', async () => {
+        const created = await ownerModel.create({ name: 'Already Public', visibility: 'public' });
+        await serverDB.insert(files).values({
+          id: 'workspace-stale-private-file',
+          fileType: 'text/plain',
+          name: 'Stale private file',
+          size: 10,
+          url: 'internal://stale-private-file',
+          userId,
+          visibility: 'private',
+          workspaceId: wsId,
+        });
+        await serverDB.insert(knowledgeBaseFiles).values({
+          fileId: 'workspace-stale-private-file',
+          knowledgeBaseId: created.id,
+          userId,
+          workspaceId: wsId,
+        });
+        const before = await serverDB.query.knowledgeBases.findFirst({
+          where: eq(knowledgeBases.id, created.id),
+        });
+
+        await ownerModel.publishToWorkspace(created.id);
+
+        const after = await serverDB.query.knowledgeBases.findFirst({
+          where: eq(knowledgeBases.id, created.id),
+        });
+        const reconciledFile = await serverDB.query.files.findFirst({
+          where: eq(files.id, 'workspace-stale-private-file'),
+        });
+        expect(after?.visibility).toBe('public');
+        expect(after?.updatedAt).toEqual(before?.updatedAt);
+        expect(reconciledFile?.visibility).toBe('public');
+      });
+
+      it('should refuse to publish another member’s private KB', async () => {
+        const owned = await ownerModel.create({ name: 'Owner Private KB', visibility: 'private' });
+
+        await memberModel.publishToWorkspace(owned.id);
+
+        const row = await serverDB.query.knowledgeBases.findFirst({
+          where: eq(knowledgeBases.id, owned.id),
+        });
+        expect(row?.visibility).toBe('private');
+        expect(row?.userId).toBe(userId);
+      });
+    });
+
+    describe('setVisibility', () => {
+      it('should flip the creator’s own public KB back to private', async () => {
+        const created = await ownerModel.create({ name: 'To Unpublish', visibility: 'public' });
+
+        await ownerModel.setVisibility(created.id, 'private');
+
+        const row = await serverDB.query.knowledgeBases.findFirst({
+          where: eq(knowledgeBases.id, created.id),
+        });
+        expect(row?.visibility).toBe('private');
+      });
+
+      it('should be a no-op when the KB already sits at the target visibility', async () => {
+        const created = await ownerModel.create({ name: 'Already Private', visibility: 'private' });
+        const before = await serverDB.query.knowledgeBases.findFirst({
+          where: eq(knowledgeBases.id, created.id),
+        });
+
+        await ownerModel.setVisibility(created.id, 'private');
+
+        const after = await serverDB.query.knowledgeBases.findFirst({
+          where: eq(knowledgeBases.id, created.id),
+        });
+        expect(after?.visibility).toBe('private');
+        expect(after?.updatedAt).toEqual(before?.updatedAt);
+      });
+
+      it('should refuse to flip another member’s KB', async () => {
+        const owned = await ownerModel.create({ name: 'Owner Public KB', visibility: 'public' });
+
+        await memberModel.setVisibility(owned.id, 'private');
+
+        const row = await serverDB.query.knowledgeBases.findFirst({
+          where: eq(knowledgeBases.id, owned.id),
+        });
+        expect(row?.visibility).toBe('public');
+        expect(row?.userId).toBe(userId);
       });
     });
   });

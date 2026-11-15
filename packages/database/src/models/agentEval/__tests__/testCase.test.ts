@@ -367,11 +367,6 @@ describe('AgentEvalTestCaseModel', () => {
       const results = await testCaseModel.findByDatasetId(datasetId);
 
       expect(results).toHaveLength(3);
-    });
-
-    it('should order by sortOrder', async () => {
-      const results = await testCaseModel.findByDatasetId(datasetId);
-
       expect(results[0].sortOrder).toBe(1);
       expect(results[1].sortOrder).toBe(2);
       expect(results[2].sortOrder).toBe(3);
@@ -416,6 +411,52 @@ describe('AgentEvalTestCaseModel', () => {
       const results = await testCaseModel.findByDatasetId(datasetId, undefined, 10);
 
       expect(results).toHaveLength(0);
+    });
+  });
+
+  describe('findByDatasetIdAndCaseId', () => {
+    it('should find a test case by metadata.caseId', async () => {
+      const created = await testCaseModel.create({
+        datasetId,
+        content: { input: 'External case' },
+        metadata: { caseId: 'case-42' },
+      });
+
+      const result = await testCaseModel.findByDatasetIdAndCaseId(datasetId, 'case-42');
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(created.id);
+    });
+
+    it('should return undefined when no case carries that caseId', async () => {
+      await testCaseModel.create({
+        datasetId,
+        content: { input: 'Some case' },
+        metadata: { caseId: 'case-1' },
+      });
+
+      const result = await testCaseModel.findByDatasetIdAndCaseId(datasetId, 'missing');
+      expect(result).toBeUndefined();
+    });
+
+    it('should not match a case from another dataset with the same caseId', async () => {
+      const [benchmark2] = await serverDB
+        .insert(agentEvalBenchmarks)
+        .values({ identifier: 'benchmark-2', isSystem: false, name: 'Benchmark 2', rubrics: [] })
+        .returning();
+      const [dataset2] = await serverDB
+        .insert(agentEvalDatasets)
+        .values({ benchmarkId: benchmark2.id, identifier: 'ds-2', name: 'DS 2', userId })
+        .returning();
+
+      await testCaseModel.create({
+        datasetId: dataset2.id,
+        content: { input: 'Other dataset case' },
+        metadata: { caseId: 'shared-id' },
+      });
+
+      const result = await testCaseModel.findByDatasetIdAndCaseId(datasetId, 'shared-id');
+      expect(result).toBeUndefined();
     });
   });
 
@@ -506,15 +547,17 @@ describe('AgentEvalTestCaseModel', () => {
       expect(result).toBeUndefined();
     });
 
-    it('should update content partially', async () => {
+    it('should preserve existing content when updating the environment', async () => {
       const [testCase] = await serverDB
         .insert(agentEvalTestCases)
         .values({
           userId,
           datasetId,
           content: {
-            input: 'Original Input',
+            category: 'memory',
+            choices: ['A', 'B'],
             expected: 'Original Expected',
+            input: 'Original Input',
           },
           sortOrder: 1,
         })
@@ -522,13 +565,86 @@ describe('AgentEvalTestCaseModel', () => {
 
       const result = await testCaseModel.update(testCase.id, {
         content: {
-          input: 'Original Input',
-          expected: 'Updated Expected',
+          environment: {
+            toolForwarding: {
+              memory: { endpoint: 'https://mock.test/tool-calls' },
+            },
+          },
         },
       });
 
-      expect(result?.content.expected).toBe('Updated Expected');
       expect(result?.content.input).toBe('Original Input');
+      expect(result?.content.expected).toBe('Original Expected');
+      expect(result?.content.choices).toEqual(['A', 'B']);
+      expect(result?.content.category).toBe('memory');
+      expect(result?.content.environment).toEqual({
+        toolForwarding: {
+          memory: { endpoint: 'https://mock.test/tool-calls' },
+        },
+      });
     });
+  });
+});
+
+describe('AgentEvalTestCaseModel system rows', () => {
+  const otherUserId = 'testcase-test-other-user';
+
+  beforeEach(async () => {
+    await serverDB.insert(users).values({ id: otherUserId });
+  });
+
+  it('reads system cases (userId null) next to its own, never another user’s', async () => {
+    await serverDB.insert(agentEvalTestCases).values([
+      {
+        content: { input: 'system' },
+        datasetId,
+        metadata: { caseId: 'sys-1' },
+        sortOrder: 0,
+        userId: null,
+      },
+      {
+        content: { input: 'mine' },
+        datasetId,
+        metadata: { caseId: 'own-1' },
+        sortOrder: 1,
+        userId,
+      },
+      {
+        content: { input: 'theirs' },
+        datasetId,
+        metadata: { caseId: 'other-1' },
+        sortOrder: 2,
+        userId: otherUserId,
+      },
+    ]);
+
+    const visible = await testCaseModel.findByDatasetId(datasetId);
+    expect(visible.map((c) => c.metadata?.caseId)).toEqual(['sys-1', 'own-1']);
+    expect(await testCaseModel.countByDatasetId(datasetId)).toBe(2);
+    expect(await testCaseModel.findByDatasetIdAndCaseId(datasetId, 'sys-1')).toBeDefined();
+    expect(await testCaseModel.findByDatasetIdAndCaseId(datasetId, 'other-1')).toBeUndefined();
+  });
+
+  it('never updates or deletes a system case', async () => {
+    const [system] = await serverDB
+      .insert(agentEvalTestCases)
+      .values({
+        content: { input: 'system' },
+        datasetId,
+        metadata: { caseId: 'sys-1' },
+        userId: null,
+      })
+      .returning();
+
+    expect(
+      await testCaseModel.update(system.id, { metadata: { caseId: 'changed' } }),
+    ).toBeUndefined();
+    await testCaseModel.delete(system.id);
+
+    const [still] = await serverDB
+      .select()
+      .from(agentEvalTestCases)
+      .where(eq(agentEvalTestCases.id, system.id));
+    expect(still.metadata).toEqual({ caseId: 'sys-1' });
   });
 });

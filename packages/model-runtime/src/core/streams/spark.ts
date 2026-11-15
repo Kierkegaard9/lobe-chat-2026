@@ -3,19 +3,19 @@ import type { Stream } from 'openai/streaming';
 
 import type { ChatStreamCallbacks } from '../../types';
 import { convertOpenAIUsage } from '../usageConverters';
+import {
+  createEventCallbacksTransformer,
+  createModelEventTransformer,
+  createSSEEncoder,
+} from './events';
 import type {
   ChatPayloadForTransformStream,
   StreamContext,
   StreamProtocolChunk,
   StreamProtocolToolCallChunk,
 } from './protocol';
-import {
-  convertIterableToStream,
-  createCallbacksTransformer,
-  createSSEProtocolTransformer,
-  generateToolCallId,
-  setOpenAIChatCompletionUsageMissingDiagnostics,
-} from './protocol';
+import { convertIterableToStream, generateToolCallId } from './protocol';
+import { setOpenAIChatCompletionUsageMissingDiagnostics } from './usageMissingDiagnostics';
 
 export function transformSparkResponseToStream(data: OpenAI.ChatCompletion) {
   return new ReadableStream({
@@ -35,12 +35,16 @@ export function transformSparkResponseToStream(data: OpenAI.ChatCompletion) {
               content: choice.message.content,
               role: choice.message.role,
               tool_calls: toolCallsArray.map(
-                (tool, index): OpenAI.ChatCompletionChunk.Choice.Delta.ToolCall => ({
-                  function: tool.function,
-                  id: tool.id,
-                  index,
-                  type: tool.type,
-                }),
+                (tool, index): OpenAI.ChatCompletionChunk.Choice.Delta.ToolCall => {
+                  // OpenAI SDK v6 made tool calls a function|custom union; lobehub only emits function calls.
+                  const fnTool = tool as OpenAI.ChatCompletionMessageFunctionToolCall;
+                  return {
+                    function: fnTool.function,
+                    id: fnTool.id,
+                    index,
+                    type: fnTool.type,
+                  };
+                },
               ),
             },
             finish_reason: null,
@@ -232,6 +236,7 @@ export const SparkAIStream = (
     transformSparkStream(chunk, streamContext, payload);
 
   return readableStream
-    .pipeThrough(createSSEProtocolTransformer(transformWithPayload, streamContext))
-    .pipeThrough(createCallbacksTransformer(callbacks, { streamStack: streamContext }));
+    .pipeThrough(createModelEventTransformer(transformWithPayload, streamContext))
+    .pipeThrough(createEventCallbacksTransformer(callbacks, { streamStack: streamContext }))
+    .pipeThrough(createSSEEncoder());
 };
